@@ -1,0 +1,88 @@
+# LLM Reverse Proxy
+
+一个用 Go 编写的 LLM API 代理服务，支持请求转发、日志记录以及流式/非流式响应处理。
+
+## 功能特性
+
+- 🚀 支持流式（SSE）和非流式响应
+- 📝 完整的请求/响应日志记录
+- 🔄 自动请求转发到目标 API
+- 🛡️ 保留原始请求头和响应头
+- 📊 JSON 格式的结构化日志
+
+## 快速开始
+
+### 编译运行
+
+```bash
+go build -o llm_proxy
+./llm_proxy
+```
+
+### 环境变量配置
+
+- `SERVER_PORT`: 代理服务监听端口 (默认: `:8080`)
+- `TARGET_URL`: 目标 API 地址 (默认: `https://api.openai.com`)
+- `LOG_DIR`: 日志存储目录 (默认: `./logs`)
+
+### 使用示例
+
+```bash
+# 设置环境变量
+export SERVER_PORT=:8080
+export TARGET_URL=https://api.openai.com
+export LOG_DIR=./logs
+
+# 运行代理
+go run main.go
+```
+
+### 测试请求
+
+#### 非流式请求
+```bash
+curl http://localhost:8080/v1/models \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+#### 流式请求
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -d '{
+    "model": "gpt-3.5-turbo",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
+  }'
+```
+
+## 日志格式
+
+日志文件保存在配置的日志目录中，文件名格式为 `llm_proxy_YYYY-MM-DD.log`。
+
+每个日志条目包含：
+- `timestamp`: 请求时间
+- `method`: HTTP 方法
+- `url`: 请求 URL
+- `headers`: 请求头
+- `body`: 请求体
+- `response_code`: 响应状态码
+- `response`: 响应内容
+- `is_stream`: 是否为流式响应
+- `error`: 错误信息（如有）
+
+## 项目结构
+
+```
+llm_reverse/
+├── main.go           # 主程序入口
+├── config/
+│   └── config.go     # 配置管理
+├── proxy/
+│   ├── handler.go    # 代理请求处理
+│   └── logger.go     # 日志记录
+├── logs/             # 日志文件目录
+├── go.mod            # Go 模块文件
+└── README.md         # 本文件
+```

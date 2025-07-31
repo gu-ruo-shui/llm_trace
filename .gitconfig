@@ -1,0 +1,21 @@
+[core]
+    # Use LF for line endings
+    autocrlf = input
+    eol = lf
+    
+    # Other useful settings
+    whitespace = fix,-indent-with-non-tab,trailing-space,cr-at-eol
+    filemode = false
+    ignorecase = false
+
+[diff]
+    # Better diff output
+    algorithm = patience
+    
+[merge]
+    # Better merge conflict resolution
+    conflictstyle = diff3
+    
+[pull]
+    # Rebase by default when pulling
+    rebase = true
