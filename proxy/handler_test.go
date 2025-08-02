@@ -149,13 +149,13 @@ func TestProxyHandler_ServeHTTP_StreamingResponse(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	// 确保响应记录器支持Flusher
-	if _, ok := rr.(http.Flusher); !ok {
+	var w http.ResponseWriter = rr
+	if _, ok := w.(http.Flusher); !ok {
 		// 创建一个自定义的ResponseRecorder
-		customRR := &streamingRecorder{ResponseRecorder: rr}
-		rr = customRR
+		w = &streamingRecorder{ResponseRecorder: rr}
 	}
 
-	handler.ServeHTTP(rr, req)
+	handler.ServeHTTP(w, req)
 
 	// 验证响应
 	if rr.Code != http.StatusOK {
@@ -326,21 +326,7 @@ func TestProxyHandler_HeaderForwarding(t *testing.T) {
 	}
 }
 
-// 自定义错误读取器
-type badReader struct{}
 
-func (br *badReader) Read([]byte) (int, error) {
-	return 0, &json.SyntaxError{Offset: 123}
-}
-
-// 自定义支持流式的响应记录器
-type streamingRecorder struct {
-	*httptest.ResponseRecorder
-}
-
-func (sr *streamingRecorder) Flush() {
-	// 实现Flusher接口
-}
 
 func TestProxyHandler_Timeout(t *testing.T) {
 	tempDir := t.TempDir()

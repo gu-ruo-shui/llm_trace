@@ -12,6 +12,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+
 func TestProxyHandlerDB_ServeHTTP_RegularResponse(t *testing.T) {
 	// 创建临时数据库
 	tempDir := t.TempDir()
@@ -115,12 +116,12 @@ func TestProxyHandlerDB_ServeHTTP_StreamingResponse(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	// 确保响应记录器支持Flusher
-	if _, ok := rr.(http.Flusher); !ok {
-		customRR := &streamingRecorder{ResponseRecorder: rr}
-		rr = customRR
+	var w http.ResponseWriter = rr
+	if _, ok := w.(http.Flusher); !ok {
+		w = &streamingRecorder{ResponseRecorder: rr}
 	}
 
-	handler.ServeHTTP(rr, req)
+	handler.ServeHTTP(w, req)
 
 	// 验证响应
 	if rr.Code != http.StatusOK {

@@ -4,111 +4,101 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A Go-based LLM API reverse proxy that forwards requests to target LLM APIs (like OpenAI) while providing comprehensive logging capabilities. Supports both file-based and SQLite database logging with streaming/non-streaming response handling.
+This is a Go-based LLM API reverse proxy server that forwards requests to LLM endpoints (default: api.aicodewith.com) with comprehensive logging capabilities. It supports both file-based JSON logging and SQLite database logging, handles SSE streaming responses, and provides request/response analytics.
+
+## Essential Commands
+
+### Build
+```bash
+go build -o llm_proxy          # Unix/Linux/Mac
+go build -o llm_reverse.exe    # Windows
+```
+
+### Test
+```bash
+go test ./...                  # Run all tests
+go test -v ./...               # Verbose test output
+go test -cover ./...           # Run with coverage
+go test -run TestName ./...    # Run specific test
+./test.sh                      # Full test suite (Unix)
+./test.bat                     # Full test suite (Windows)
+```
+
+### Run
+```bash
+./llm_proxy                    # Run with default config
+CONFIG_FILE=config.yaml ./llm_proxy  # Use YAML config
+USE_DB=true ./llm_proxy        # Enable database logging
+```
 
 ## Architecture
 
-- **Entry Point**: `main.go` - Configures and starts the proxy server
-- **Configuration**: `config/config.go` - JSON/YAML config file and environment variable support
-- **Proxy Logic**: `proxy/handler.go` and `proxy/handler_db.go` - HTTP request forwarding with logging
-- **Logging**: 
-  - `proxy/logger.go` - File-based JSON logging
-  - `proxy/db_logger.go` - SQLite database logging with query capabilities
+### Core Components
 
-## Key Features
+1. **Proxy Handlers** (`proxy/` package):
+   - `handler.go`: File-based logging proxy - writes JSON logs to daily-rotated files
+   - `handler_db.go`: Database logging proxy - stores requests/responses in SQLite with indexing
+   - Both handlers preserve headers, handle SSE streaming, and forward requests transparently
 
-- **Dual Logging Modes**: File-based JSON logs vs SQLite database storage (configurable via `UseDB`)
-- **Streaming Support**: Handles SSE (Server-Sent Events) for LLM streaming responses
-- **Request/Response Logging**: Complete HTTP transaction logging including headers, body, and timing
-- **Configuration**: Supports JSON/YAML config files plus environment variable overrides
+2. **Logging System**:
+   - `proxy/logger.go`: Thread-safe file logger with daily rotation (format: `llm_proxy_YYYY-MM-DD.log`)
+   - `proxy/db_logger.go`: SQLite logger with query capabilities, automatic cleanup, and performance metrics
+   - Logs capture: timestamps, URLs, methods, headers, bodies, response times, error states
 
-## Development Commands
+3. **Configuration** (`config/` package):
+   - Supports JSON/YAML files with environment variable overrides
+   - Key settings: SERVER_PORT, TARGET_URL, LOG_DIR, DB_PATH, USE_DB
+   - Loads from `config.json` by default, override with CONFIG_FILE env var
 
-### Build & Run
-```bash
-# Build binary
-go build -o llm_proxy
+### Request Flow
 
-# Run with file logging (default)
-go run main.go
+1. Client sends request to proxy server (default :8080)
+2. Proxy handler intercepts and logs request details
+3. Request forwarded to target LLM API (preserving headers)
+4. Response received and logged (handles both regular and SSE streaming)
+5. Response forwarded to client with original headers
+6. Log entry written to file or database based on configuration
 
-# Run with database logging
-USE_DB=true go run main.go
+### Database Schema (when USE_DB=true)
 
-# Run with custom config
-CONFIG_FILE=config.json go run main.go
-```
-
-### Environment Variables
-- `SERVER_PORT`: Listen port (default: `:8080`)
-- `TARGET_URL`: Target API URL (default: `https://api.aicodewith.com`)
-- `LOG_DIR`: Log directory (default: `./logs`)
-- `DB_PATH`: SQLite database path (default: `./logs/proxy.db`)
-- `USE_DB`: Enable database logging (default: `false`)
-- `CONFIG_FILE`: Config file path (default: `config.json`)
-
-### Configuration Files
-Create `config.json` or `config.yaml`:
-```json
-{
-  "server_port": ":8080",
-  "target_url": "https://api.openai.com",
-  "log_dir": "./logs",
-  "db_path": "./logs/proxy.db",
-  "use_db": false
-}
-```
-
-### Testing
-```bash
-# Test non-streaming
-curl http://localhost:8080/v1/models -H "Authorization: Bearer YOUR_KEY"
-
-# Test streaming
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_KEY" \
-  -d '{"model": "gpt-3.5-turbo", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'
-```
-
-## Dependencies
-
-- Go 1.21+
-- SQLite3 (for database logging mode)
-- No external Go dependencies (uses standard library only)
-
-## Database Schema
-
-When `UseDB=true`, creates SQLite table:
 ```sql
-CREATE TABLE request_logs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  timestamp DATETIME,
-  method TEXT,
-  url TEXT,
-  headers TEXT,
-  body TEXT,
-  response_code INTEGER,
-  response TEXT,
-  is_stream BOOLEAN,
-  error TEXT,
-  duration_ms INTEGER
+CREATE TABLE logs (
+    id INTEGER PRIMARY KEY,
+    timestamp TEXT,
+    method TEXT,
+    url TEXT,
+    request_headers TEXT,
+    request_body TEXT,
+    response_status INTEGER,
+    response_headers TEXT,
+    response_body TEXT,
+    response_time_ms INTEGER,
+    error TEXT
 );
+-- Indexes on timestamp, url, response_status for query performance
 ```
 
-## File Structure
+## Testing Approach
 
-```
-llm_reverse/
-├── main.go              # Server entry point
-├── config/
-│   └── config.go        # Configuration management
-├── proxy/
-│   ├── handler.go       # File logging proxy handler
-│   ├── handler_db.go    # Database logging proxy handler
-│   ├── logger.go        # File-based logging
-│   └── db_logger.go     # SQLite database logging
-├── logs/                # Default log directory
-├── config.json          # Configuration file
-└── go.mod              # Go module definition
-```
+- Unit tests for individual components (config, loggers, handlers)
+- Integration tests using httpbin.org for real HTTP scenarios
+- Performance tests for concurrent request handling
+- Database tests for SQLite operations and concurrent writes
+- Mock implementations in `proxy/test_utils.go` for isolated testing
+
+## Key Configuration Options
+
+- `SERVER_PORT`: Proxy listening port (default: `:8080`)
+- `TARGET_URL`: Target LLM API endpoint (default: `https://api.aicodewith.com`)
+- `LOG_DIR`: Directory for file logs (default: `./logs`)
+- `DB_PATH`: SQLite database path (default: `./logs/proxy.db`)
+- `USE_DB`: Toggle database vs file logging (default: `false`)
+- `LOG_MAX_AGE_DAYS`: Days to retain logs (database mode only)
+
+## Development Notes
+
+- Go 1.21+ required for modern features and SQLite driver
+- Uses `github.com/mattn/go-sqlite3` for database functionality
+- HTTP transport configured with connection pooling and timeouts for production use
+- Graceful shutdown handling with signal interrupts (SIGINT/SIGTERM)
+- Thread-safe implementations for concurrent request handling

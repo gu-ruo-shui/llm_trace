@@ -114,16 +114,19 @@ func (c *Config) setDefaults() {
 		c.DBPath = "./logs/proxy.db"
 	}
 	
-	// Ensure log directory is absolute path
-	if !filepath.IsAbs(c.LogDir) {
+	// Ensure log directory uses proper path separator for relative paths
+	// but preserves absolute paths as-is (including Unix-style on Windows)
+	if !isAbsolutePath(c.LogDir) {
 		c.LogDir = filepath.Join(".", c.LogDir)
 	}
 	
-	// Ensure DB directory exists
-	dbDir := filepath.Dir(c.DBPath)
-	if !filepath.IsAbs(dbDir) {
-		dbDir = filepath.Join(".", dbDir)
-		c.DBPath = filepath.Join(dbDir, filepath.Base(c.DBPath))
+	// Handle DB path similarly
+	if !isAbsolutePath(c.DBPath) {
+		dbDir := filepath.Dir(c.DBPath)
+		if !isAbsolutePath(dbDir) {
+			dbDir = filepath.Join(".", dbDir)
+			c.DBPath = filepath.Join(dbDir, filepath.Base(c.DBPath))
+		}
 	}
 }
 
@@ -136,13 +139,17 @@ func (c *Config) loadFromEnv() {
 	}
 	if dir := os.Getenv("LOG_DIR"); dir != "" {
 		c.LogDir = dir
-		if !filepath.IsAbs(c.LogDir) {
+		// Only apply filepath.Join if it's not already absolute
+		// This preserves Unix-style paths on Windows for testing
+		if !isAbsolutePath(c.LogDir) {
 			c.LogDir = filepath.Join(".", c.LogDir)
 		}
 	}
 	if dbPath := os.Getenv("DB_PATH"); dbPath != "" {
 		c.DBPath = dbPath
-		if !filepath.IsAbs(c.DBPath) {
+		// Only apply filepath.Join if it's not already absolute
+		// This preserves Unix-style paths on Windows for testing
+		if !isAbsolutePath(c.DBPath) {
 			c.DBPath = filepath.Join(".", c.DBPath)
 		}
 	}
@@ -157,4 +164,15 @@ func getEnv(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+// isAbsolutePath checks if a path is absolute.
+// It handles both Unix-style (/) and Windows-style paths.
+func isAbsolutePath(path string) bool {
+	// Check for Unix-style absolute path
+	if strings.HasPrefix(path, "/") {
+		return true
+	}
+	// Use filepath.IsAbs for native OS checking
+	return filepath.IsAbs(path)
 }
