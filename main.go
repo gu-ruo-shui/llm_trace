@@ -15,15 +15,33 @@ func main() {
 	// Load configuration
 	cfg := config.Load()
 
-	// Initialize logger
-	logger, err := proxy.NewLogger(cfg.LogDir)
-	if err != nil {
-		log.Fatalf("Failed to initialize logger: %v", err)
+	var handler http.Handler
+	
+	if cfg.UseDB {
+		// Initialize database logger
+		fmt.Println("Using database logging...")
+		dbLogger, err := proxy.NewDatabaseLogger(cfg.DBPath)
+		if err != nil {
+			log.Fatalf("Failed to initialize database logger: %v", err)
+		}
+		defer dbLogger.Close()
+		
+		// Create proxy handler with database logging
+		handler = proxy.NewProxyHandlerDB(cfg.TargetURL, dbLogger)
+		fmt.Printf("Logs will be stored in database: %s\n", cfg.DBPath)
+	} else {
+		// Initialize file logger
+		fmt.Println("Using file logging...")
+		logger, err := proxy.NewLogger(cfg.LogDir)
+		if err != nil {
+			log.Fatalf("Failed to initialize logger: %v", err)
+		}
+		defer logger.Close()
+		
+		// Create proxy handler with file logging
+		handler = proxy.NewProxyHandler(cfg.TargetURL, logger)
+		fmt.Printf("Logs will be written to: %s\n", cfg.LogDir)
 	}
-	defer logger.Close()
-
-	// Create proxy handler
-	handler := proxy.NewProxyHandler(cfg.TargetURL, logger)
 
 	// Setup HTTP server
 	mux := http.NewServeMux()
@@ -41,7 +59,6 @@ func main() {
 	go func() {
 		fmt.Printf("LLM Proxy Server starting on %s\n", cfg.ServerPort)
 		fmt.Printf("Proxying requests to: %s\n", cfg.TargetURL)
-		fmt.Printf("Logs will be written to: %s\n", cfg.LogDir)
 		
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed to start: %v", err)

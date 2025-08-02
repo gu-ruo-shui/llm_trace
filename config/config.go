@@ -11,6 +11,8 @@ type Config struct {
 	ServerPort string `json:"server_port" yaml:"server_port"`
 	TargetURL  string `json:"target_url" yaml:"target_url"`
 	LogDir     string `json:"log_dir" yaml:"log_dir"`
+	DBPath     string `json:"db_path" yaml:"db_path"`
+	UseDB      bool   `json:"use_db" yaml:"use_db"`
 }
 
 func Load() *Config {
@@ -89,6 +91,10 @@ func (c *Config) loadFromYAML(data []byte) {
 			c.TargetURL = value
 		case "log_dir":
 			c.LogDir = value
+		case "db_path":
+			c.DBPath = value
+		case "use_db":
+			c.UseDB = (value == "true" || value == "1")
 		}
 	}
 	c.setDefaults()
@@ -104,10 +110,20 @@ func (c *Config) setDefaults() {
 	if c.LogDir == "" {
 		c.LogDir = "./logs"
 	}
+	if c.DBPath == "" {
+		c.DBPath = "./logs/proxy.db"
+	}
 	
 	// Ensure log directory is absolute path
 	if !filepath.IsAbs(c.LogDir) {
 		c.LogDir = filepath.Join(".", c.LogDir)
+	}
+	
+	// Ensure DB directory exists
+	dbDir := filepath.Dir(c.DBPath)
+	if !filepath.IsAbs(dbDir) {
+		dbDir = filepath.Join(".", dbDir)
+		c.DBPath = filepath.Join(dbDir, filepath.Base(c.DBPath))
 	}
 }
 
@@ -123,6 +139,15 @@ func (c *Config) loadFromEnv() {
 		if !filepath.IsAbs(c.LogDir) {
 			c.LogDir = filepath.Join(".", c.LogDir)
 		}
+	}
+	if dbPath := os.Getenv("DB_PATH"); dbPath != "" {
+		c.DBPath = dbPath
+		if !filepath.IsAbs(c.DBPath) {
+			c.DBPath = filepath.Join(".", c.DBPath)
+		}
+	}
+	if useDB := os.Getenv("USE_DB"); useDB == "true" || useDB == "1" {
+		c.UseDB = true
 	}
 }
 
