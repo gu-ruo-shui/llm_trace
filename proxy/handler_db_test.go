@@ -251,52 +251,6 @@ func TestProxyHandlerDB_ServeHTTP_ErrorCases(t *testing.T) {
 		})
 	}
 }
-
-func TestProxyHandlerDB_QueryParameters(t *testing.T) {
-	tempDir := t.TempDir()
-	dbPath := filepath.Join(tempDir, "test.db")
-
-	logger, err := NewDatabaseLogger(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create database logger: %v", err)
-	}
-	defer logger.Close()
-
-	// 创建模拟目标服务器
-	mock := newMockServer()
-	defer mock.Close()
-
-	mock.Server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.RawQuery != "param1=value1&param2=value2" {
-			t.Errorf("Expected query parameters to be preserved, got %s", r.URL.RawQuery)
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"query":"received"}`))
-	})
-
-	handler := NewProxyHandlerDB(mock.URL, logger)
-
-	// 创建带查询参数的测试请求
-	req := httptest.NewRequest("GET", "/test?param1=value1&param2=value2", nil)
-
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", rr.Code)
-	}
-
-	// 验证日志包含查询参数
-	logs, err := logger.GetLogsByURL("/test?param1=value1&param2=value2", 10)
-	if err != nil {
-		t.Fatalf("Failed to get logs by URL: %v", err)
-	}
-
-	if len(logs) != 1 {
-		t.Errorf("Expected 1 log entry with query parameters, got %d", len(logs))
-	}
-}
-
 func TestProxyHandlerDB_HeaderForwarding(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test.db")

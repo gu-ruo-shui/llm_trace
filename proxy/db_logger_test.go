@@ -234,44 +234,6 @@ func TestDatabaseLogger_GetLogs(t *testing.T) {
 	}
 }
 
-func TestDatabaseLogger_GetLogsByURL(t *testing.T) {
-	tempDir := t.TempDir()
-	dbPath := filepath.Join(tempDir, "test.db")
-
-	logger, err := NewDatabaseLogger(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create database logger: %v", err)
-	}
-	defer logger.Close()
-
-	// 插入测试数据
-	_, err = logger.db.Exec(`
-		INSERT INTO request_logs (timestamp, method, url, response_code) VALUES
-		(datetime('now'), 'GET', '/test1', 200),
-		(datetime('now'), 'POST', '/test2', 201),
-		(datetime('now'), 'GET', '/test1', 200)
-	`)
-	if err != nil {
-		t.Fatalf("Failed to insert test data: %v", err)
-	}
-
-	// 测试按URL获取日志
-	logs, err := logger.GetLogsByURL("/test1", 10)
-	if err != nil {
-		t.Fatalf("Failed to get logs by URL: %v", err)
-	}
-
-	if len(logs) != 2 {
-		t.Errorf("Expected 2 logs for /test1, got %d", len(logs))
-	}
-
-	for _, log := range logs {
-		if log.URL != "/test1" {
-			t.Errorf("Expected URL /test1, got %s", log.URL)
-		}
-	}
-}
-
 func TestDatabaseLogger_GetErrorLogs(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test.db")
@@ -583,25 +545,6 @@ func TestDatabaseLogger_GetLogs_ErrorHandling(t *testing.T) {
 
 	// Try to get logs - should return error
 	_, err = logger.GetLogs(10, 0)
-	if err == nil {
-		t.Error("Expected error when querying closed database")
-	}
-}
-
-func TestDatabaseLogger_GetLogsByURL_ErrorHandling(t *testing.T) {
-	tempDir := t.TempDir()
-	dbPath := filepath.Join(tempDir, "test.db")
-
-	logger, err := NewDatabaseLogger(dbPath)
-	if err != nil {
-		t.Fatalf("Failed to create database logger: %v", err)
-	}
-
-	// Close the database to simulate query error
-	logger.db.Close()
-
-	// Try to get logs by URL - should return error
-	_, err = logger.GetLogsByURL("/test", 10)
 	if err == nil {
 		t.Error("Expected error when querying closed database")
 	}

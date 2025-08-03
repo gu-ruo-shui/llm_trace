@@ -180,51 +180,6 @@ func (dl *DatabaseLogger) GetLogs(limit int, offset int) ([]DatabaseRequestLog, 
 	return logs, nil
 }
 
-func (dl *DatabaseLogger) GetLogsByURL(url string, limit int) ([]DatabaseRequestLog, error) {
-	query := `
-	SELECT id, timestamp, method, url, headers, body, response_code, response, is_stream, error, duration_ms
-	FROM request_logs
-	WHERE url = ?
-	ORDER BY timestamp DESC
-	LIMIT ?
-	`
-
-	rows, err := dl.db.Query(query, url, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var logs []DatabaseRequestLog
-	for rows.Next() {
-		var log DatabaseRequestLog
-		var headers, body, response, errorMsg sql.NullString
-		err := rows.Scan(
-			&log.ID,
-			&log.Timestamp,
-			&log.Method,
-			&log.URL,
-			&headers,
-			&body,
-			&log.ResponseCode,
-			&response,
-			&log.IsStream,
-			&errorMsg,
-			&log.Duration,
-		)
-		if err != nil {
-			return nil, err
-		}
-		log.Headers = headers.String
-		log.Body = body.String
-		log.Response = response.String
-		log.Error = errorMsg.String
-		logs = append(logs, log)
-	}
-
-	return logs, nil
-}
-
 func (dl *DatabaseLogger) GetErrorLogs(limit int) ([]DatabaseRequestLog, error) {
 	query := `
 	SELECT id, timestamp, method, url, headers, body, response_code, response, is_stream, error, duration_ms
