@@ -472,17 +472,17 @@ func TestProxyHandlerDB_StreamingReadError(t *testing.T) {
 		t.Fatalf("Failed to get logs: %v", err)
 	}
 
-	// Should have logged the chunk
-	hasStreamLog := false
+	// Should have logged the request and final response (not individual chunks)
+	hasRequestLog := false
 	for _, log := range logs {
-		if log.IsStream && strings.Contains(log.Response, "data: chunk1") {
-			hasStreamLog = true
+		if log.Method == "GET" && log.URL == "/stream" {
+			hasRequestLog = true
 			break
 		}
 	}
 
-	if !hasStreamLog {
-		t.Error("Expected first chunk to be logged to database")
+	if !hasRequestLog {
+		t.Error("Expected request to be logged to database")
 	}
 }
 

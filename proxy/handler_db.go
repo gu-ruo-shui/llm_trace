@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -114,6 +115,7 @@ func (p *ProxyHandlerDB) handleStreamingResponse(w http.ResponseWriter, resp *ht
 
 	reader := bufio.NewReader(resp.Body)
 	var streamBuffer bytes.Buffer
+	sequence := 0
 
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -134,16 +136,40 @@ func (p *ProxyHandlerDB) handleStreamingResponse(w http.ResponseWriter, resp *ht
 		// Accumulate for logging
 		streamBuffer.Write(line)
 
-		// Log chunks periodically or on data: lines
-		if bytes.HasPrefix(line, []byte("data: ")) {
-			duration := time.Since(time.Now().Add(-startDuration))
-			p.logger.LogStreamChunk(logEntry, string(line), duration)
+		// Parse and log SSE events
+		lineStr := string(line)
+		if strings.HasPrefix(lineStr, "event: ") {
+			eventType := strings.TrimSpace(strings.TrimPrefix(lineStr, "event: "))
+			// Look for the next data line
+			dataLine, err := reader.ReadBytes('\n')
+			if err == nil && strings.HasPrefix(string(dataLine), "data: ") {
+				// Write the data line to response too
+				if _, writeErr := w.Write(dataLine); writeErr != nil {
+					p.logger.LogError(logEntry, writeErr)
+					break
+				}
+				flusher.Flush()
+				streamBuffer.Write(dataLine)
+
+				dataContent := strings.TrimSpace(strings.TrimPrefix(string(dataLine), "data: "))
+				p.logger.LogSSEEvent(logEntry.RequestUUID, eventType, dataContent, sequence)
+				sequence++
+			}
 		}
 	}
 
-	// Log final accumulated stream
+	// Process SSE events and store as JSON response
+	processedSSE, err := p.logger.ProcessSSEEvents(logEntry.RequestUUID)
+	if err == nil {
+		processedJSON, _ := json.Marshal(processedSSE)
+		logEntry.Response = string(processedJSON)
+	} else {
+		logEntry.Response = streamBuffer.String()
+	}
+
+	// Log final response
 	finalDuration := time.Since(time.Now().Add(-startDuration))
-	p.logger.LogResponse(logEntry, resp, streamBuffer.Bytes(), true, finalDuration)
+	p.logger.LogResponse(logEntry, resp, []byte(logEntry.Response), true, finalDuration)
 }
 
 func (p *ProxyHandlerDB) handleRegularResponse(w http.ResponseWriter, resp *http.Response, logEntry *DatabaseRequestLog, duration time.Duration) {

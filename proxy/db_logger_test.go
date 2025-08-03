@@ -137,9 +137,10 @@ func TestDatabaseLogger_LogError(t *testing.T) {
 	defer logger.Close()
 
 	log := &DatabaseRequestLog{
-		Method:    "POST",
-		URL:       "/test",
-		Timestamp: time.Now(),
+		RequestUUID: "test-uuid",
+		Method:      "POST",
+		URL:         "/test",
+		Timestamp:   time.Now(),
 	}
 
 	testErr := fmt.Errorf("test error: invalid JSON at offset 123")
