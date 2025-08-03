@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -135,11 +136,12 @@ func TestDatabaseLogger_LogError(t *testing.T) {
 	defer logger.Close()
 
 	log := &DatabaseRequestLog{
-		Method: "POST",
-		URL:    "/test",
+		Method:    "POST",
+		URL:       "/test",
+		Timestamp: time.Now(),
 	}
 
-	testErr := &json.SyntaxError{Offset: 123}
+	testErr := fmt.Errorf("test error: invalid JSON at offset 123")
 	logger.LogError(log, testErr)
 
 	if log.Error == "" {
@@ -377,17 +379,18 @@ func TestDatabaseLogger_GetStats(t *testing.T) {
 		t.Fatalf("Failed to get stats: %v", err)
 	}
 
-	if stats["total_logs"] != 4.0 {
+	if stats["total_logs"] != 4 {
 		t.Errorf("Expected total_logs 4, got %v", stats["total_logs"])
 	}
-	if stats["error_logs"] != 1.0 {
+	if stats["error_logs"] != 1 {
 		t.Errorf("Expected error_logs 1, got %v", stats["error_logs"])
 	}
-	if stats["today_logs"] != 4.0 {
+	if stats["today_logs"] != 4 {
 		t.Errorf("Expected today_logs 4, got %v", stats["today_logs"])
 	}
-	if stats["avg_duration_ms"] != 112.5 {
-		t.Errorf("Expected avg_duration_ms 112.5, got %v", stats["avg_duration_ms"])
+	// Average should be (100 + 200 + 150) / 3 = 150, excluding error log with 0 duration
+	if stats["avg_duration_ms"] != 150.0 {
+		t.Errorf("Expected avg_duration_ms 150.0, got %v", stats["avg_duration_ms"])
 	}
 }
 

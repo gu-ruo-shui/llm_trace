@@ -31,8 +31,19 @@ type Logger struct {
 }
 
 func NewLogger(logDir string) (*Logger, error) {
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create log directory: %w", err)
+	// Check if directory exists first
+	if stat, err := os.Stat(logDir); err != nil {
+		if os.IsNotExist(err) {
+			// Try to create the directory
+			if err := os.MkdirAll(logDir, 0755); err != nil {
+				return nil, fmt.Errorf("failed to create log directory: %w", err)
+			}
+		} else {
+			// Some other error (e.g., permission denied)
+			return nil, fmt.Errorf("failed to access log directory: %w", err)
+		}
+	} else if !stat.IsDir() {
+		return nil, fmt.Errorf("log path exists but is not a directory")
 	}
 
 	fileName := fmt.Sprintf("llm_proxy_%s.log", time.Now().Format("2006-01-02"))
@@ -70,7 +81,9 @@ func (l *Logger) LogResponse(log *RequestLog, resp *http.Response, body []byte, 
 }
 
 func (l *Logger) LogError(log *RequestLog, err error) {
-	log.Error = err.Error()
+	if err != nil {
+		log.Error = err.Error()
+	}
 	l.writeLog(log)
 }
 
@@ -115,5 +128,10 @@ func ReadRequestBody(req *http.Request) ([]byte, error) {
 	}
 
 	req.Body = io.NopCloser(bytes.NewReader(body))
+	
+	// Return nil for empty body instead of empty slice
+	if len(body) == 0 {
+		return nil, nil
+	}
 	return body, nil
 }

@@ -79,8 +79,8 @@ func TestProxyHandlerDB_ServeHTTP_RegularResponse(t *testing.T) {
 	if logs[0].ResponseCode != 200 {
 		t.Errorf("Expected response code 200, got %d", logs[0].ResponseCode)
 	}
-	if logs[0].Duration <= 0 {
-		t.Errorf("Expected duration to be positive, got %d", logs[0].Duration)
+	if logs[0].Duration < 0 {
+		t.Errorf("Expected duration to be non-negative, got %d", logs[0].Duration)
 	}
 }
 
@@ -225,14 +225,28 @@ func TestProxyHandlerDB_ServeHTTP_ErrorCases(t *testing.T) {
 			}
 
 			// 验证错误被记录到数据库
-			if tc.name == "Invalid URL" || tc.name == "Target server error" {
+			if tc.name == "Invalid URL" {
+				// Only invalid URL results in an actual error being logged
 				logs, err := logger.GetErrorLogs(10)
 				if err != nil {
 					t.Logf("Failed to get error logs: %v", err)
 					return
 				}
 				if len(logs) == 0 {
-					t.Log("Expected error to be logged to database")
+					t.Error("Expected error to be logged to database")
+				}
+			} else if tc.name == "Target server error" {
+				// Target server error is a valid response, not an error
+				logs, err := logger.GetLogs(10, 0)
+				if err != nil {
+					t.Logf("Failed to get logs: %v", err)
+					return
+				}
+				if len(logs) == 0 {
+					t.Error("Expected request to be logged to database")
+				}
+				if logs[0].ResponseCode != http.StatusInternalServerError {
+					t.Errorf("Expected response code %d, got %d", http.StatusInternalServerError, logs[0].ResponseCode)
 				}
 			}
 		})

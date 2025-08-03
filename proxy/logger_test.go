@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,8 +30,10 @@ func TestNewLogger(t *testing.T) {
 }
 
 func TestNewLogger_InvalidDir(t *testing.T) {
-	invalidDir := "/invalid/path/that/does/not/exist"
-
+	// Use a path that should fail on both Windows and Unix
+	// Try to use an invalid character in the path or a protected location
+	invalidDir := string([]byte{0}) + "invalid" // Null character in path
+	
 	_, err := NewLogger(invalidDir)
 	if err == nil {
 		t.Error("Expected error for invalid directory, got nil")
@@ -100,11 +103,11 @@ func TestLogger_LogError(t *testing.T) {
 		URL:    "/test",
 	}
 
-	testErr := &json.SyntaxError{Offset: 123}
+	testErr := fmt.Errorf("test error: invalid JSON at offset 123")
 	logger.LogError(log, testErr)
 
 	if log.Error == "" {
-		t.Error("Expected error to be logged")
+		t.Errorf("Expected error to be logged, but got empty string. Error was: %v", testErr)
 	}
 }
 

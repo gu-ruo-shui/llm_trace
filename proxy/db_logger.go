@@ -94,7 +94,9 @@ func (dl *DatabaseLogger) LogResponse(log *DatabaseRequestLog, resp *http.Respon
 }
 
 func (dl *DatabaseLogger) LogError(log *DatabaseRequestLog, err error) {
-	log.Error = err.Error()
+	if err != nil {
+		log.Error = err.Error()
+	}
 	dl.writeLog(log)
 }
 
@@ -151,22 +153,27 @@ func (dl *DatabaseLogger) GetLogs(limit int, offset int) ([]DatabaseRequestLog, 
 	var logs []DatabaseRequestLog
 	for rows.Next() {
 		var log DatabaseRequestLog
+		var headers, body, response, errorMsg sql.NullString
 		err := rows.Scan(
 			&log.ID,
 			&log.Timestamp,
 			&log.Method,
 			&log.URL,
-			&log.Headers,
-			&log.Body,
+			&headers,
+			&body,
 			&log.ResponseCode,
-			&log.Response,
+			&response,
 			&log.IsStream,
-			&log.Error,
+			&errorMsg,
 			&log.Duration,
 		)
 		if err != nil {
 			return nil, err
 		}
+		log.Headers = headers.String
+		log.Body = body.String
+		log.Response = response.String
+		log.Error = errorMsg.String
 		logs = append(logs, log)
 	}
 
@@ -191,22 +198,27 @@ func (dl *DatabaseLogger) GetLogsByURL(url string, limit int) ([]DatabaseRequest
 	var logs []DatabaseRequestLog
 	for rows.Next() {
 		var log DatabaseRequestLog
+		var headers, body, response, errorMsg sql.NullString
 		err := rows.Scan(
 			&log.ID,
 			&log.Timestamp,
 			&log.Method,
 			&log.URL,
-			&log.Headers,
-			&log.Body,
+			&headers,
+			&body,
 			&log.ResponseCode,
-			&log.Response,
+			&response,
 			&log.IsStream,
-			&log.Error,
+			&errorMsg,
 			&log.Duration,
 		)
 		if err != nil {
 			return nil, err
 		}
+		log.Headers = headers.String
+		log.Body = body.String
+		log.Response = response.String
+		log.Error = errorMsg.String
 		logs = append(logs, log)
 	}
 
@@ -231,22 +243,27 @@ func (dl *DatabaseLogger) GetErrorLogs(limit int) ([]DatabaseRequestLog, error) 
 	var logs []DatabaseRequestLog
 	for rows.Next() {
 		var log DatabaseRequestLog
+		var headers, body, response, errorMsg sql.NullString
 		err := rows.Scan(
 			&log.ID,
 			&log.Timestamp,
 			&log.Method,
 			&log.URL,
-			&log.Headers,
-			&log.Body,
+			&headers,
+			&body,
 			&log.ResponseCode,
-			&log.Response,
+			&response,
 			&log.IsStream,
-			&log.Error,
+			&errorMsg,
 			&log.Duration,
 		)
 		if err != nil {
 			return nil, err
 		}
+		log.Headers = headers.String
+		log.Body = body.String
+		log.Response = response.String
+		log.Error = errorMsg.String
 		logs = append(logs, log)
 	}
 
@@ -290,13 +307,17 @@ func (dl *DatabaseLogger) GetStats() (map[string]interface{}, error) {
 	}
 	stats["today_logs"] = todayCount
 
-	// Average response time
-	var avgDuration float64
-	err = dl.db.QueryRow("SELECT AVG(duration_ms) FROM request_logs WHERE duration_ms > 0").Scan(&avgDuration)
+	// Average response time (excluding error logs with 0 duration)
+	var avgDuration sql.NullFloat64
+	err = dl.db.QueryRow("SELECT AVG(duration_ms) FROM request_logs WHERE duration_ms > 0 AND (error IS NULL OR error = '')").Scan(&avgDuration)
 	if err != nil {
 		return nil, err
 	}
-	stats["avg_duration_ms"] = avgDuration
+	if avgDuration.Valid {
+		stats["avg_duration_ms"] = avgDuration.Float64
+	} else {
+		stats["avg_duration_ms"] = 0.0
+	}
 
 	return stats, nil
 }
