@@ -65,7 +65,7 @@ func createTables(db *sql.DB) error {
 	query := `
 	CREATE TABLE IF NOT EXISTS request_logs (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		request_uuid TEXT NOT NULL UNIQUE,
+		request_uuid TEXT NOT NULL,
 		timestamp DATETIME NOT NULL,
 		method TEXT NOT NULL,
 		url TEXT NOT NULL,
@@ -86,7 +86,7 @@ func createTables(db *sql.DB) error {
 		event_type TEXT NOT NULL,
 		data TEXT,
 		sequence INTEGER NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	
 	CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs(timestamp);
