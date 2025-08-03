@@ -128,7 +128,7 @@ func ReadRequestBody(req *http.Request) ([]byte, error) {
 	}
 
 	req.Body = io.NopCloser(bytes.NewReader(body))
-	
+
 	// Return nil for empty body instead of empty slice
 	if len(body) == 0 {
 		return nil, nil

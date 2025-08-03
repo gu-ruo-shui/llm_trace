@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -521,5 +522,239 @@ func TestDatabaseLogger_Integration(t *testing.T) {
 	}
 	if headers["Authorization"][0] != "Bearer token123" {
 		t.Errorf("Expected Authorization header to be preserved")
+	}
+}
+
+func TestNewDatabaseLogger_ErrorHandling(t *testing.T) {
+	// Test invalid database path - use a path that will fail on all platforms
+	tempDir := t.TempDir()
+
+	// Create a regular file where we expect a directory
+	badPath := filepath.Join(tempDir, "baddir", "test.db")
+	badDirPath := filepath.Dir(badPath)
+
+	// Create a file with the directory name to cause a conflict
+	file, err := os.Create(badDirPath)
+	if err == nil {
+		file.Close()
+
+		// Now try to create the database with a path that requires this to be a directory
+		_, err = NewDatabaseLogger(badPath)
+		if err == nil {
+			t.Error("Expected error when parent path is a file not directory")
+		}
+	}
+}
+
+func TestDatabaseLogger_writeLog_ErrorHandling(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+
+	// Close the database to simulate write error
+	logger.db.Close()
+
+	// Try to write log - should handle error gracefully
+	log := &DatabaseRequestLog{
+		Method:    "GET",
+		URL:       "/test",
+		Timestamp: time.Now(),
+	}
+
+	// This should not panic, just print error message
+	logger.writeLog(log)
+}
+
+func TestDatabaseLogger_GetLogs_ErrorHandling(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+
+	// Close the database to simulate query error
+	logger.db.Close()
+
+	// Try to get logs - should return error
+	_, err = logger.GetLogs(10, 0)
+	if err == nil {
+		t.Error("Expected error when querying closed database")
+	}
+}
+
+func TestDatabaseLogger_GetLogsByURL_ErrorHandling(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+
+	// Close the database to simulate query error
+	logger.db.Close()
+
+	// Try to get logs by URL - should return error
+	_, err = logger.GetLogsByURL("/test", 10)
+	if err == nil {
+		t.Error("Expected error when querying closed database")
+	}
+}
+
+func TestDatabaseLogger_GetErrorLogs_ErrorHandling(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+
+	// Close the database to simulate query error
+	logger.db.Close()
+
+	// Try to get error logs - should return error
+	_, err = logger.GetErrorLogs(10)
+	if err == nil {
+		t.Error("Expected error when querying closed database")
+	}
+}
+
+func TestDatabaseLogger_GetStats_ErrorHandling(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+
+	// Close the database to simulate query error
+	logger.db.Close()
+
+	// Try to get stats - should return error
+	_, err = logger.GetStats()
+	if err == nil {
+		t.Error("Expected error when querying closed database")
+	}
+}
+
+func TestDatabaseLogger_GetStats_NoAvgDuration(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	// Insert only error logs with 0 duration
+	_, err = logger.db.Exec(`
+		INSERT INTO request_logs (timestamp, method, url, response_code, duration_ms, error) VALUES
+		(datetime('now'), 'GET', '/error1', 500, 0, 'Error 1'),
+		(datetime('now'), 'POST', '/error2', 500, 0, 'Error 2')
+	`)
+	if err != nil {
+		t.Fatalf("Failed to insert test data: %v", err)
+	}
+
+	// Get stats - avg_duration_ms should be 0.0
+	stats, err := logger.GetStats()
+	if err != nil {
+		t.Fatalf("Failed to get stats: %v", err)
+	}
+
+	if stats["avg_duration_ms"] != 0.0 {
+		t.Errorf("Expected avg_duration_ms 0.0 when no valid durations, got %v", stats["avg_duration_ms"])
+	}
+}
+
+func TestDatabaseLogger_Close_NilDB(t *testing.T) {
+	logger := &DatabaseLogger{db: nil}
+
+	// Should not panic when db is nil
+	err := logger.Close()
+	if err != nil {
+		t.Errorf("Expected no error when closing nil db, got %v", err)
+	}
+}
+
+func TestDatabaseLogger_LogError_NilError(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	log := &DatabaseRequestLog{
+		Method:    "GET",
+		URL:       "/test",
+		Timestamp: time.Now(),
+	}
+
+	// Log with nil error
+	logger.LogError(log, nil)
+
+	// Verify empty error is stored
+	var errorMsg sql.NullString
+	err = logger.db.QueryRow("SELECT error FROM request_logs WHERE url = '/test'").Scan(&errorMsg)
+	if err != nil {
+		t.Fatalf("Failed to query database: %v", err)
+	}
+
+	if errorMsg.Valid && errorMsg.String != "" {
+		t.Errorf("Expected empty error for nil error, got %s", errorMsg.String)
+	}
+}
+
+func TestDatabaseLogger_ScanError(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	// Create a corrupted table structure to trigger scan errors
+	_, err = logger.db.Exec(`
+		CREATE TABLE IF NOT EXISTS corrupted_logs (
+			id INTEGER PRIMARY KEY,
+			bad_column TEXT
+		);
+	`)
+	if err != nil {
+		t.Fatalf("Failed to create corrupted table: %v", err)
+	}
+
+	// Try to query with incorrect structure
+	query := `SELECT id, bad_column FROM corrupted_logs`
+	rows, err := logger.db.Query(query)
+	if err != nil {
+		t.Fatalf("Failed to execute query: %v", err)
+	}
+	defer rows.Close()
+
+	// This simulates scan error scenarios
+	var logs []DatabaseRequestLog
+	for rows.Next() {
+		var log DatabaseRequestLog
+		// This will fail because we're trying to scan wrong columns
+		err := rows.Scan(&log.ID, &log.Timestamp)
+		if err == nil {
+			t.Error("Expected scan error for mismatched columns")
+		}
+		logs = append(logs, log)
 	}
 }

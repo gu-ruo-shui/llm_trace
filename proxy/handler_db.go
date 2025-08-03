@@ -32,7 +32,7 @@ func NewProxyHandlerDB(targetURL string, logger *DatabaseLogger) *ProxyHandlerDB
 
 func (p *ProxyHandlerDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
-	
+
 	// Read request body
 	reqBody, err := ReadRequestBody(r)
 	if err != nil {

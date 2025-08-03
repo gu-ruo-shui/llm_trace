@@ -17,35 +17,35 @@ type Config struct {
 
 func Load() *Config {
 	config := &Config{}
-	
+
 	// Try to load from config file
 	config.loadFromFile()
-	
+
 	// Override with environment variables if they exist
 	config.loadFromEnv()
-	
+
 	return config
 }
 
 func (c *Config) loadFromFile() {
 	configFile := getEnv("CONFIG_FILE", "config.json")
-	
+
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		// Config file doesn't exist, use defaults
 		c.setDefaults()
 		return
 	}
-	
+
 	data, err := os.ReadFile(configFile)
 	if err != nil {
 		// Use defaults if can't read file
 		c.setDefaults()
 		return
 	}
-	
+
 	// Determine file type based on extension
 	ext := strings.ToLower(filepath.Ext(configFile))
-	
+
 	switch ext {
 	case ".json":
 		c.loadFromJSON(data)
@@ -75,15 +75,15 @@ func (c *Config) loadFromYAML(data []byte) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		
+
 		parts := strings.SplitN(line, ":", 2)
 		if len(parts) != 2 {
 			continue
 		}
-		
+
 		key := strings.TrimSpace(parts[0])
 		value := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
-		
+
 		switch key {
 		case "server_port":
 			c.ServerPort = value
@@ -113,13 +113,13 @@ func (c *Config) setDefaults() {
 	if c.DBPath == "" {
 		c.DBPath = "./logs/proxy.db"
 	}
-	
+
 	// Ensure log directory uses proper path separator for relative paths
 	// but preserves absolute paths as-is (including Unix-style on Windows)
 	if !isAbsolutePath(c.LogDir) {
 		c.LogDir = filepath.Join(".", c.LogDir)
 	}
-	
+
 	// Handle DB path similarly
 	if !isAbsolutePath(c.DBPath) {
 		dbDir := filepath.Dir(c.DBPath)

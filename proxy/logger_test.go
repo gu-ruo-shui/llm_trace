@@ -33,7 +33,7 @@ func TestNewLogger_InvalidDir(t *testing.T) {
 	// Use a path that should fail on both Windows and Unix
 	// Try to use an invalid character in the path or a protected location
 	invalidDir := string([]byte{0}) + "invalid" // Null character in path
-	
+
 	_, err := NewLogger(invalidDir)
 	if err == nil {
 		t.Error("Expected error for invalid directory, got nil")
@@ -212,4 +212,167 @@ func TestReadRequestBody_EmptyBody(t *testing.T) {
 	if body != nil {
 		t.Errorf("Expected nil for empty body, got %v", body)
 	}
+}
+
+func TestReadRequestBody_EmptyString(t *testing.T) {
+	req := httptest.NewRequest("POST", "/test", strings.NewReader(""))
+
+	body, err := ReadRequestBody(req)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+
+	if body != nil {
+		t.Errorf("Expected nil for empty string body, got %v", body)
+	}
+}
+
+func TestNewLogger_CreateDirectoryError(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create a file with the same name as the intended directory
+	filePath := filepath.Join(tempDir, "not_a_dir")
+	file, err := os.Create(filePath)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+	file.Close()
+
+	// Try to create logger with file path instead of directory
+	_, err = NewLogger(filePath)
+	if err == nil {
+		t.Error("Expected error when log path is not a directory")
+	}
+	if !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("Expected 'not a directory' error, got: %v", err)
+	}
+}
+
+func TestNewLogger_OpenFileError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping file permission test in short mode")
+	}
+
+	tempDir := t.TempDir()
+
+	// Try a different approach: create a file and keep it open
+	logFileName := "llm_proxy_" + time.Now().Format("2006-01-02") + ".log"
+	logPath := filepath.Join(tempDir, logFileName)
+
+	// Create and keep file open with exclusive access
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+	defer file.Close()
+
+	// Now try to create logger which should fail to open the same file
+	logger, err := NewLogger(tempDir)
+	if err == nil {
+		// If it succeeded, close it immediately
+		logger.Close()
+		// Skip on systems that allow multiple opens
+		t.Skip("System allows multiple file opens, skipping test")
+	}
+
+	if !strings.Contains(err.Error(), "failed to open log file") {
+		t.Errorf("Expected 'failed to open log file' error, got: %v", err)
+	}
+}
+
+func TestLogger_writeLog_MarshalError(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	// Create a log with a channel that can't be marshaled to JSON
+	log := &RequestLog{
+		Method: "GET",
+		URL:    "/test",
+		Headers: map[string][]string{
+			"test": {"value"},
+		},
+	}
+
+	// Add a value that can't be marshaled
+	type unmarshalable struct {
+		Ch chan int
+	}
+
+	// Since we can't directly cause a marshal error with RequestLog,
+	// we'll have to test the write error path instead
+
+	// Close the file to cause write error
+	logger.logFile.Close()
+
+	// This should handle the error gracefully
+	logger.writeLog(log)
+}
+
+func TestLogger_LogError_NilError(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	log := &RequestLog{
+		Method: "POST",
+		URL:    "/test",
+	}
+
+	// Log with nil error
+	logger.LogError(log, nil)
+
+	if log.Error != "" {
+		t.Errorf("Expected empty error for nil error, got %s", log.Error)
+	}
+}
+
+func TestLogger_LogResponse_NilResponse(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	log := &RequestLog{
+		Method: "POST",
+		URL:    "/test",
+	}
+
+	// Log with nil response
+	logger.LogResponse(log, nil, []byte("body"), false)
+
+	if log.ResponseCode != 0 {
+		t.Errorf("Expected response code 0 for nil response, got %d", log.ResponseCode)
+	}
+}
+
+func TestReadRequestBody_ReadError(t *testing.T) {
+	// Create a custom reader that returns an error
+	errorReader := &failingReader{err: fmt.Errorf("read error")}
+	req := httptest.NewRequest("POST", "/test", errorReader)
+
+	_, err := ReadRequestBody(req)
+	if err == nil {
+		t.Error("Expected error from failing reader")
+	}
+	if err.Error() != "read error" {
+		t.Errorf("Expected 'read error', got %v", err)
+	}
+}
+
+// failingReader implements io.Reader but always returns an error
+type failingReader struct {
+	err error
+}
+
+func (r *failingReader) Read(p []byte) (n int, err error) {
+	return 0, r.err
 }

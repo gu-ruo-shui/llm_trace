@@ -12,7 +12,6 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-
 func TestProxyHandlerDB_ServeHTTP_RegularResponse(t *testing.T) {
 	// 创建临时数据库
 	tempDir := t.TempDir()
@@ -406,5 +405,258 @@ func TestProxyHandlerDB_DurationCalculation(t *testing.T) {
 
 	if logs[0].Duration < 40 {
 		t.Errorf("Expected duration >= 40ms, got %d", logs[0].Duration)
+	}
+}
+
+func TestProxyHandlerDB_InvalidProxyRequest(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	// Use invalid URL with control characters
+	handler := NewProxyHandlerDB("http://\x00invalid", logger)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("Expected status 500 for invalid proxy URL, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "Failed to create proxy request") {
+		t.Errorf("Expected error message about proxy request creation")
+	}
+}
+
+func TestProxyHandlerDB_StreamingWithoutFlusher(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	// 创建模拟目标服务器
+	mock := newMockServer()
+	defer mock.Close()
+
+	mock.addResponse("/stream", &mockResponse{
+		statusCode: http.StatusOK,
+		headers:    map[string]string{"Content-Type": "text/event-stream"},
+		body:       "data: test\n",
+		stream:     true,
+	})
+
+	handler := NewProxyHandlerDB(mock.URL, logger)
+
+	// 创建不支持Flusher的自定义ResponseWriter
+	req := httptest.NewRequest("GET", "/stream", nil)
+	rr := newNonFlushingRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code() != http.StatusInternalServerError {
+		t.Errorf("Expected status 500 when Flusher not supported, got %d", rr.Code())
+	}
+	if !strings.Contains(rr.Body().String(), "Streaming unsupported") {
+		t.Errorf("Expected error message about streaming unsupported")
+	}
+}
+
+func TestProxyHandlerDB_StreamingReadError(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	// 创建模拟服务器，会在流式响应中断开连接
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		// 写入一些数据后关闭连接
+		w.Write([]byte("data: chunk1\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+
+		// 强制关闭底层连接以模拟读取错误
+		hj, ok := w.(http.Hijacker)
+		if ok {
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+		}
+	}))
+	defer mock.Close()
+
+	handler := NewProxyHandlerDB(mock.URL, logger)
+
+	req := httptest.NewRequest("GET", "/stream", nil)
+	rr := httptest.NewRecorder()
+	w := &streamingRecorder{ResponseRecorder: rr}
+
+	handler.ServeHTTP(w, req)
+
+	// 验证数据库中有错误日志
+	time.Sleep(100 * time.Millisecond) // 等待日志写入
+
+	// 由于连接关闭，应该有流式日志
+	logs, err := logger.GetLogs(10, 0)
+	if err != nil {
+		t.Fatalf("Failed to get logs: %v", err)
+	}
+
+	// Should have logged the chunk
+	hasStreamLog := false
+	for _, log := range logs {
+		if log.IsStream && strings.Contains(log.Response, "data: chunk1") {
+			hasStreamLog = true
+			break
+		}
+	}
+
+	if !hasStreamLog {
+		t.Error("Expected first chunk to be logged to database")
+	}
+}
+
+func TestProxyHandlerDB_StreamingWriteError(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	// 创建模拟目标服务器
+	mock := newMockServer()
+	defer mock.Close()
+
+	mock.addResponse("/stream", &mockResponse{
+		statusCode: http.StatusOK,
+		headers:    map[string]string{"Content-Type": "text/event-stream"},
+		body:       "data: chunk1\ndata: chunk2\n",
+		stream:     true,
+	})
+
+	handler := NewProxyHandlerDB(mock.URL, logger)
+
+	req := httptest.NewRequest("GET", "/stream", nil)
+	// Use a failing writer that errors on write
+	rr := &failingWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		failAfter:        1, // Fail after first write
+	}
+
+	handler.ServeHTTP(rr, req)
+
+	// 验证错误被记录到数据库
+	time.Sleep(100 * time.Millisecond) // 等待日志写入
+
+	errorLogs, err := logger.GetErrorLogs(10)
+	if err != nil {
+		t.Fatalf("Failed to get error logs: %v", err)
+	}
+
+	if len(errorLogs) == 0 {
+		t.Error("Expected write error to be logged to database")
+	}
+}
+
+func TestProxyHandlerDB_RegularResponseReadError(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	// 创建会返回读取错误的模拟服务器
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "100") // 声明内容长度
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("partial")) // 只写入部分内容
+		// 不写入剩余内容，导致读取错误
+	}))
+	defer mock.Close()
+
+	handler := NewProxyHandlerDB(mock.URL, logger)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	// 验证错误被记录到数据库
+	time.Sleep(100 * time.Millisecond) // 等待日志写入
+
+	errorLogs, err := logger.GetErrorLogs(10)
+	if err != nil {
+		t.Fatalf("Failed to get error logs: %v", err)
+	}
+
+	if len(errorLogs) == 0 {
+		t.Error("Expected read error to be logged to database")
+	}
+}
+
+func TestProxyHandlerDB_RegularResponseWriteError(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	// 创建模拟目标服务器
+	mock := newMockServer()
+	defer mock.Close()
+
+	mock.addResponse("/test", &mockResponse{
+		statusCode: http.StatusOK,
+		headers:    map[string]string{"Content-Type": "application/json"},
+		body:       `{"response":"test"}`,
+		stream:     false,
+	})
+
+	handler := NewProxyHandlerDB(mock.URL, logger)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	// Use a failing writer
+	rr := &failingWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		failAfter:        0, // Fail immediately
+	}
+
+	handler.ServeHTTP(rr, req)
+
+	// 验证错误被记录到数据库
+	time.Sleep(100 * time.Millisecond) // 等待日志写入
+
+	errorLogs, err := logger.GetErrorLogs(10)
+	if err != nil {
+		t.Fatalf("Failed to get error logs: %v", err)
+	}
+
+	if len(errorLogs) == 0 {
+		t.Error("Expected write error to be logged to database")
 	}
 }

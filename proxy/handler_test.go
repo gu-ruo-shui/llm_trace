@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -326,8 +327,6 @@ func TestProxyHandler_HeaderForwarding(t *testing.T) {
 	}
 }
 
-
-
 func TestProxyHandler_Timeout(t *testing.T) {
 	tempDir := t.TempDir()
 	logger, err := NewLogger(tempDir)
@@ -358,4 +357,298 @@ func TestProxyHandler_Timeout(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Errorf("Expected status 200 for non-streaming, got %d", rr.Code)
 	}
+}
+
+func TestProxyHandler_InvalidProxyRequest(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	// Use invalid URL with control characters
+	handler := NewProxyHandler("http://\x00invalid", logger)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("Expected status 500 for invalid proxy URL, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "Failed to create proxy request") {
+		t.Errorf("Expected error message about proxy request creation")
+	}
+}
+
+func TestProxyHandler_StreamingWithoutFlusher(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	// 创建模拟目标服务器
+	mock := newMockServer()
+	defer mock.Close()
+
+	mock.addResponse("/stream", &mockResponse{
+		statusCode: http.StatusOK,
+		headers:    map[string]string{"Content-Type": "text/event-stream"},
+		body:       "data: test\n",
+		stream:     true,
+	})
+
+	handler := NewProxyHandler(mock.URL, logger)
+
+	// 创建不支持Flusher的自定义ResponseWriter
+	req := httptest.NewRequest("GET", "/stream", nil)
+	rr := newNonFlushingRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code() != http.StatusInternalServerError {
+		t.Errorf("Expected status 500 when Flusher not supported, got %d", rr.Code())
+	}
+	if !strings.Contains(rr.Body().String(), "Streaming unsupported") {
+		t.Errorf("Expected error message about streaming unsupported")
+	}
+}
+
+func TestProxyHandler_StreamingReadError(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	// 创建模拟服务器，会在流式响应中断开连接
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		// 写入一些数据后关闭连接
+		w.Write([]byte("data: chunk1\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+
+		// 强制关闭底层连接以模拟读取错误
+		hj, ok := w.(http.Hijacker)
+		if ok {
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+		}
+	}))
+	defer mock.Close()
+
+	handler := NewProxyHandler(mock.URL, logger)
+
+	req := httptest.NewRequest("GET", "/stream", nil)
+	rr := httptest.NewRecorder()
+	w := &streamingRecorder{ResponseRecorder: rr}
+
+	handler.ServeHTTP(w, req)
+
+	// 验证日志文件包含错误
+	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
+	content, _ := os.ReadFile(logFile)
+
+	// Should have logged the chunk before error
+	if !strings.Contains(string(content), "data: chunk1") {
+		t.Error("Expected first chunk to be logged")
+	}
+}
+
+func TestProxyHandler_StreamingWriteError(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	// 创建模拟目标服务器
+	mock := newMockServer()
+	defer mock.Close()
+
+	mock.addResponse("/stream", &mockResponse{
+		statusCode: http.StatusOK,
+		headers:    map[string]string{"Content-Type": "text/event-stream"},
+		body:       "data: chunk1\ndata: chunk2\n",
+		stream:     true,
+	})
+
+	handler := NewProxyHandler(mock.URL, logger)
+
+	req := httptest.NewRequest("GET", "/stream", nil)
+	// Use a failing writer that errors on write
+	rr := &failingWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		failAfter:        1, // Fail after first write
+	}
+
+	handler.ServeHTTP(rr, req)
+
+	// 验证错误被记录
+	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
+	content, _ := os.ReadFile(logFile)
+
+	if !strings.Contains(string(content), "error") {
+		t.Error("Expected write error to be logged")
+	}
+}
+
+func TestProxyHandler_RegularResponseReadError(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	// 创建会返回读取错误的模拟服务器
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Use a custom ResponseWriter that causes read errors
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("ResponseWriter doesn't support hijacking")
+		}
+
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+
+		// Hijack the connection and close it to simulate read error
+		conn, _, _ := hj.Hijack()
+		conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial"))
+		conn.Close()
+	}))
+	defer mock.Close()
+
+	handler := NewProxyHandler(mock.URL, logger)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	// 验证错误被记录
+	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
+	content, _ := os.ReadFile(logFile)
+
+	// Should have an error logged or bad gateway response
+	if rr.Code != http.StatusBadGateway && !strings.Contains(string(content), "error") {
+		t.Error("Expected connection error to be handled")
+	}
+}
+
+func TestProxyHandler_RegularResponseWriteError(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	// 创建模拟目标服务器
+	mock := newMockServer()
+	defer mock.Close()
+
+	mock.addResponse("/test", &mockResponse{
+		statusCode: http.StatusOK,
+		headers:    map[string]string{"Content-Type": "application/json"},
+		body:       `{"response":"test"}`,
+		stream:     false,
+	})
+
+	handler := NewProxyHandler(mock.URL, logger)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	// Use a failing writer
+	rr := &failingWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		failAfter:        0, // Fail immediately
+	}
+
+	handler.ServeHTTP(rr, req)
+
+	// 验证错误被记录
+	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
+	content, _ := os.ReadFile(logFile)
+
+	if !strings.Contains(string(content), "error") {
+		t.Error("Expected write error to be logged")
+	}
+}
+
+// nonFlushingRecorder is a ResponseWriter that doesn't implement http.Flusher
+type nonFlushingRecorder struct {
+	code   int
+	header http.Header
+	body   *bytes.Buffer
+}
+
+func newNonFlushingRecorder() *nonFlushingRecorder {
+	return &nonFlushingRecorder{
+		header: make(http.Header),
+		body:   new(bytes.Buffer),
+		code:   200,
+	}
+}
+
+func (r *nonFlushingRecorder) Header() http.Header {
+	return r.header
+}
+
+func (r *nonFlushingRecorder) Write(b []byte) (int, error) {
+	return r.body.Write(b)
+}
+
+func (r *nonFlushingRecorder) WriteHeader(statusCode int) {
+	r.code = statusCode
+}
+
+func (r *nonFlushingRecorder) Code() int {
+	return r.code
+}
+
+func (r *nonFlushingRecorder) Body() *bytes.Buffer {
+	return r.body
+}
+
+// failingWriter is a ResponseWriter that fails after a certain number of writes
+type failingWriter struct {
+	*httptest.ResponseRecorder
+	writeCount int
+	failAfter  int
+}
+
+func (fw *failingWriter) Write(p []byte) (int, error) {
+	if fw.writeCount >= fw.failAfter {
+		return 0, http.ErrBodyNotAllowed
+	}
+	fw.writeCount++
+	return fw.ResponseRecorder.Write(p)
+}
+
+func (fw *failingWriter) Flush() {
+	// Implement Flusher interface
+}
+
+func TestStreamingRecorder_Flush(t *testing.T) {
+	// Test that streamingRecorder implements Flusher interface correctly
+	rr := httptest.NewRecorder()
+	sr := &streamingRecorder{ResponseRecorder: rr}
+
+	// Verify it implements http.Flusher
+	if _, ok := interface{}(sr).(http.Flusher); !ok {
+		t.Error("streamingRecorder should implement http.Flusher")
+	}
+
+	// Call Flush to ensure coverage
+	sr.Flush()
 }
