@@ -227,8 +227,9 @@ func (dl *DatabaseLogger) ProcessSSEEvents(requestUUID string) (*ProcessedSSERes
 
 		// Extract tool name from content_block_start events
 		if eventType == "content_block_start" {
-			if toolUse, ok := eventData["tool_use"].(map[string]interface{}); ok {
-				if name, ok := toolUse["name"].(string); ok {
+			// Check for content_block.name (new format)
+			if contentBlock, ok := eventData["content_block"].(map[string]interface{}); ok {
+				if name, ok := contentBlock["name"].(string); ok {
 					processed.ToolName = name
 				}
 			}
