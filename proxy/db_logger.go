@@ -37,11 +37,8 @@ type SSEEvent struct {
 }
 
 type ProcessedSSEResponse struct {
-	MessageStart  map[string]interface{}   `json:"message_start,omitempty"`
-	ContentBlocks []map[string]interface{} `json:"content_blocks,omitempty"`
-	MessageDelta  map[string]interface{}   `json:"message_delta,omitempty"`
-	MessageStop   map[string]interface{}   `json:"message_stop,omitempty"`
-	ProcessedText string                   `json:"processed_text,omitempty"`
+	ToolName      string `json:"tool_name,omitempty"`
+	ProcessedText string `json:"processed_text,omitempty"`
 }
 
 type DatabaseLogger struct {
@@ -202,7 +199,7 @@ func (dl *DatabaseLogger) ProcessSSEEvents(requestUUID string) (*ProcessedSSERes
 	query := `
 	SELECT event_type, data, sequence 
 	FROM sse_events 
-	WHERE request_uuid = ? 
+	WHERE request_uuid = ? AND event_type != 'ping'
 	ORDER BY sequence ASC
 	`
 
@@ -212,12 +209,8 @@ func (dl *DatabaseLogger) ProcessSSEEvents(requestUUID string) (*ProcessedSSERes
 	}
 	defer rows.Close()
 
-	processed := &ProcessedSSEResponse{
-		ContentBlocks: make([]map[string]interface{}, 0),
-	}
-
+	processed := &ProcessedSSEResponse{}
 	var textParts []string
-	contentBlockIndex := 0
 
 	for rows.Next() {
 		var eventType, data string
@@ -226,45 +219,32 @@ func (dl *DatabaseLogger) ProcessSSEEvents(requestUUID string) (*ProcessedSSERes
 			continue
 		}
 
-		if eventType == "message_start" {
-			var messageStart map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &messageStart); err == nil {
-				processed.MessageStart = messageStart
-			}
-		} else if eventType == "content_block_start" {
-			var contentBlockStart map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &contentBlockStart); err == nil {
-				processed.ContentBlocks = append(processed.ContentBlocks, contentBlockStart)
-				contentBlockIndex = len(processed.ContentBlocks) - 1
-			}
-		} else if eventType == "content_block_delta" {
-			var delta map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &delta); err == nil {
-				if deltaInfo, ok := delta["delta"].(map[string]interface{}); ok {
-					if text, ok := deltaInfo["text"].(string); ok {
-						textParts = append(textParts, text)
-					}
-					if partialJSON, ok := deltaInfo["partial_json"].(string); ok {
-						textParts = append(textParts, partialJSON)
-					}
-				}
-				if contentBlockIndex < len(processed.ContentBlocks) {
-					if processed.ContentBlocks[contentBlockIndex]["deltas"] == nil {
-						processed.ContentBlocks[contentBlockIndex]["deltas"] = make([]map[string]interface{}, 0)
-					}
-					deltas := processed.ContentBlocks[contentBlockIndex]["deltas"].([]map[string]interface{})
-					processed.ContentBlocks[contentBlockIndex]["deltas"] = append(deltas, delta)
+		// Parse the JSON data
+		var eventData map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &eventData); err != nil {
+			continue
+		}
+
+		// Extract tool name from content_block_start events
+		if eventType == "content_block_start" {
+			if toolUse, ok := eventData["tool_use"].(map[string]interface{}); ok {
+				if name, ok := toolUse["name"].(string); ok {
+					processed.ToolName = name
 				}
 			}
-		} else if eventType == "message_delta" {
-			var messageDelta map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &messageDelta); err == nil {
-				processed.MessageDelta = messageDelta
-			}
-		} else if eventType == "message_stop" {
-			var messageStop map[string]interface{}
-			if err := json.Unmarshal([]byte(data), &messageStop); err == nil {
-				processed.MessageStop = messageStop
+		}
+
+		// Extract text content from content_block_delta events
+		if eventType == "content_block_delta" {
+			if deltaInfo, ok := eventData["delta"].(map[string]interface{}); ok {
+				// For text content
+				if text, ok := deltaInfo["text"].(string); ok {
+					textParts = append(textParts, text)
+				}
+				// For partial JSON content (tool use parameters)
+				if partialJSON, ok := deltaInfo["partial_json"].(string); ok {
+					textParts = append(textParts, partialJSON)
+				}
 			}
 		}
 	}
