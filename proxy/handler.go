@@ -9,6 +9,30 @@ import (
 	"time"
 )
 
+// NewHTTPClient creates a new HTTP client with proxy support for regular requests
+func NewHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment,
+			MaxIdleConns:        100,
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
+		},
+	}
+}
+
+// NewStreamingHTTPClient creates a new HTTP client with proxy support for streaming requests
+func NewStreamingHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:              http.ProxyFromEnvironment,
+			DisableCompression: true,
+		},
+		Timeout: 0, // No timeout for streaming
+	}
+}
+
 type ProxyHandler struct {
 	targetURL string
 	logger    *Logger
@@ -19,14 +43,7 @@ func NewProxyHandler(targetURL string, logger *Logger) *ProxyHandler {
 	return &ProxyHandler{
 		targetURL: targetURL,
 		logger:    logger,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				IdleConnTimeout:     90 * time.Second,
-				TLSHandshakeTimeout: 10 * time.Second,
-			},
-		},
+		client:    NewHTTPClient(30 * time.Second),
 	}
 }
 
@@ -62,12 +79,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Make the request with custom transport for SSE
-	client := &http.Client{
-		Transport: &http.Transport{
-			DisableCompression: true,
-		},
-		Timeout: 0, // No timeout for streaming
-	}
+	client := NewStreamingHTTPClient()
 
 	resp, err := client.Do(proxyReq)
 	if err != nil {

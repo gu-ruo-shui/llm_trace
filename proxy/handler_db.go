@@ -20,14 +20,7 @@ func NewProxyHandlerDB(targetURL string, logger *DatabaseLogger) *ProxyHandlerDB
 	return &ProxyHandlerDB{
 		targetURL: targetURL,
 		logger:    logger,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				IdleConnTimeout:     90 * time.Second,
-				TLSHandshakeTimeout: 10 * time.Second,
-			},
-		},
+		client:    NewHTTPClient(30 * time.Second),
 	}
 }
 
@@ -65,12 +58,7 @@ func (p *ProxyHandlerDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Make the request with custom transport for SSE
-	client := &http.Client{
-		Transport: &http.Transport{
-			DisableCompression: true,
-		},
-		Timeout: 0, // No timeout for streaming
-	}
+	client := NewStreamingHTTPClient()
 
 	resp, err := client.Do(proxyReq)
 	if err != nil {
