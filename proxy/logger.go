@@ -46,18 +46,34 @@ func NewLogger(logDir string) (*Logger, error) {
 		return nil, fmt.Errorf("log path exists but is not a directory")
 	}
 
-	fileName := fmt.Sprintf("llm_proxy_%s.log", time.Now().Format("2006-01-02"))
-	filePath := filepath.Join(logDir, fileName)
-
-	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	file, err := createLogFile(logDir)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open log file: %w", err)
+		return nil, err
 	}
 
 	return &Logger{
 		logFile: file,
 		logDir:  logDir,
 	}, nil
+}
+
+func createLogFile(logDir string) (*os.File, error) {
+	baseName := fmt.Sprintf("llm_proxy_%s", time.Now().Format("2006-01-02-150405"))
+	for i := 0; ; i++ {
+		fileName := baseName + ".log"
+		if i > 0 {
+			fileName = fmt.Sprintf("%s-%d.log", baseName, i)
+		}
+
+		filePath := filepath.Join(logDir, fileName)
+		file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0644)
+		if err == nil {
+			return file, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("failed to create log file: %w", err)
+		}
+	}
 }
 
 func (l *Logger) LogRequest(req *http.Request, body []byte) *RequestLog {

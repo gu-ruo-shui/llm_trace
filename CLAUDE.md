@@ -16,12 +16,19 @@ go build -o llm_reverse.exe    # Windows
 
 ### Test
 ```bash
-go test ./...                  # Run all tests
-go test -v ./...               # Verbose test output
-go test -cover ./...           # Run with coverage
-go test -run TestName ./...    # Run specific test
-./test.sh                      # Full test suite (Unix)
-./test.bat                     # Full test suite (Windows)
+go test ./...                  # Run all tests on Unix/Linux/Mac
+go test -v ./...               # Verbose test output on Unix/Linux/Mac
+go test -cover ./...           # Run with coverage on Unix/Linux/Mac
+go test -run TestName ./...    # Run specific test on Unix/Linux/Mac
+./test.sh                      # Full test suite (Unix/Linux/Mac)
+```
+
+```powershell
+go test ./...                  # Run all tests on Windows; use PowerShell
+go test -v ./...               # Verbose test output on Windows
+go test -cover ./...           # Run with coverage on Windows
+go test -run TestName ./...    # Run specific test on Windows
+.\test.bat                     # Full test suite (Windows)
 ```
 
 ### Run
@@ -41,7 +48,7 @@ USE_DB=true ./llm_proxy        # Enable database logging
    - Both handlers preserve headers, handle SSE streaming, and forward requests transparently
 
 2. **Logging System**:
-   - `proxy/logger.go`: Thread-safe file logger with daily rotation (format: `llm_proxy_YYYY-MM-DD.log`)
+   - `proxy/logger.go`: Thread-safe file logger that creates a new file on each start (timestamped `llm_proxy_YYYY-MM-DD-HHMMSS[-n].log`)
    - `proxy/db_logger.go`: SQLite logger with query capabilities, automatic cleanup, and performance metrics
    - Logs capture: timestamps, URLs, methods, headers, bodies, response times, error states
 

@@ -59,7 +59,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ## 日志格式
 
-日志文件保存在配置的日志目录中，文件名格式为 `llm_proxy_YYYY-MM-DD.log`。
+日志文件保存在配置的日志目录中，启动时会创建新的日志文件，文件名通常包含启动时间戳，避免复用或追加到旧文件。
 
 每个日志条目包含：
 - `timestamp`: 请求时间

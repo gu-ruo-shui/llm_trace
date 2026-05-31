@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestNewLogger(t *testing.T) {
@@ -22,10 +21,16 @@ func TestNewLogger(t *testing.T) {
 	}
 	defer logger.Close()
 
-	// 检查日志文件是否创建
-	expectedFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
-	if _, err := os.Stat(expectedFile); os.IsNotExist(err) {
-		t.Errorf("Expected log file %s to be created", expectedFile)
+	// 检查日志文件是否创建，且文件名包含启动时间戳而不是按天复用
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to read temp dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Expected exactly 1 log file, got %d", len(entries))
+	}
+	if !strings.HasPrefix(entries[0].Name(), "llm_proxy_") || !strings.HasSuffix(entries[0].Name(), ".log") {
+		t.Errorf("Unexpected log file name: %s", entries[0].Name())
 	}
 }
 
@@ -124,8 +129,7 @@ func TestLogger_LogStreamChunk(t *testing.T) {
 	logger.LogStreamChunk(log, "data: test chunk\n")
 
 	// 验证日志文件中有内容
-	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
-	content, _ := os.ReadFile(logFile)
+	content, _ := os.ReadFile(logger.logFile.Name())
 
 	var loggedLine RequestLog
 	lines := strings.Split(string(content), "\n")
@@ -166,8 +170,7 @@ func TestLogger_ConcurrentWrites(t *testing.T) {
 	}
 
 	// 验证所有内容都被写入
-	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
-	content, _ := os.ReadFile(logFile)
+	content, _ := os.ReadFile(logger.logFile.Name())
 
 	lines := strings.Split(string(content), "\n")
 	count := 0
@@ -248,35 +251,43 @@ func TestNewLogger_CreateDirectoryError(t *testing.T) {
 	}
 }
 
-func TestNewLogger_OpenFileError(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping file permission test in short mode")
-	}
-
+func TestNewLogger_NewStartCreatesNewFile(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Try a different approach: create a file and keep it open
-	logFileName := "llm_proxy_" + time.Now().Format("2006-01-02") + ".log"
-	logPath := filepath.Join(tempDir, logFileName)
-
-	// Create and keep file open with exclusive access
-	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	first, err := NewLogger(tempDir)
 	if err != nil {
-		t.Fatalf("Failed to create test file: %v", err)
+		t.Fatalf("Failed to create first logger: %v", err)
 	}
-	defer file.Close()
+	first.writeLog(&RequestLog{Method: "GET", URL: "/first"})
+	firstPath := first.logFile.Name()
+	first.Close()
 
-	// Now try to create logger which should fail to open the same file
-	logger, err := NewLogger(tempDir)
-	if err == nil {
-		// If it succeeded, close it immediately
-		logger.Close()
-		// Skip on systems that allow multiple opens
-		t.Skip("System allows multiple file opens, skipping test")
+	second, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create second logger: %v", err)
+	}
+	defer second.Close()
+	second.writeLog(&RequestLog{Method: "GET", URL: "/second"})
+	secondPath := second.logFile.Name()
+
+	if firstPath == secondPath {
+		t.Fatalf("Expected a new log file for a new logger start, got same file %s", firstPath)
 	}
 
-	if !strings.Contains(err.Error(), "failed to open log file") {
-		t.Errorf("Expected 'failed to open log file' error, got: %v", err)
+	firstContent, err := os.ReadFile(firstPath)
+	if err != nil {
+		t.Fatalf("Failed to read first log file: %v", err)
+	}
+	if strings.Contains(string(firstContent), "/second") {
+		t.Error("Expected second start not to append to first log file")
+	}
+
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to read log dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("Expected 2 log files, got %d", len(entries))
 	}
 }
 

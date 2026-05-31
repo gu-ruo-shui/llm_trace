@@ -19,6 +19,29 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+func readLogDir(t *testing.T, logDir string) string {
+	t.Helper()
+
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("Failed to read log dir: %v", err)
+	}
+
+	var content strings.Builder
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "llm_proxy_") || !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(logDir, entry.Name()))
+		if err != nil {
+			t.Fatalf("Failed to read log file %s: %v", entry.Name(), err)
+		}
+		content.Write(data)
+	}
+
+	return content.String()
+}
+
 // TestServer 用于集成测试的测试服务器
 type TestServer struct {
 	Server *httptest.Server
@@ -134,8 +157,7 @@ func TestIntegrationWithHTTPBin(t *testing.T) {
 		}
 
 		// 验证日志文件
-		logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
-		if _, err := os.Stat(logFile); os.IsNotExist(err) {
+		if content := readLogDir(t, tempDir); content == "" {
 			t.Errorf("Expected log file to be created")
 		}
 	})
@@ -313,10 +335,9 @@ func TestIntegration_ErrorHandling(t *testing.T) {
 		}
 
 		// 验证错误被记录
-		logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
-		content, _ := os.ReadFile(logFile)
+		content := readLogDir(t, tempDir)
 
-		if !strings.Contains(string(content), "error") {
+		if !strings.Contains(content, "error") {
 			t.Error("Expected error to be logged")
 		}
 	})

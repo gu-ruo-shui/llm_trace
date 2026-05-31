@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -112,8 +111,7 @@ func TestProxyHandler_ServeHTTP_RegularResponse(t *testing.T) {
 	}
 
 	// 验证日志文件
-	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
-	content, _ := os.ReadFile(logFile)
+	content, _ := os.ReadFile(logger.logFile.Name())
 
 	if !strings.Contains(string(content), "test") {
 		t.Error("Expected request to be logged")
@@ -172,8 +170,7 @@ func TestProxyHandler_ServeHTTP_StreamingResponse(t *testing.T) {
 	}
 
 	// 验证日志文件包含流式内容
-	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
-	content, _ := os.ReadFile(logFile)
+	content, _ := os.ReadFile(logger.logFile.Name())
 
 	if !strings.Contains(string(content), "data: chunk1") {
 		t.Error("Expected streaming chunks to be logged")
@@ -455,8 +452,7 @@ func TestProxyHandler_StreamingReadError(t *testing.T) {
 	handler.ServeHTTP(w, req)
 
 	// 验证日志文件包含错误
-	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
-	content, _ := os.ReadFile(logFile)
+	content, _ := os.ReadFile(logger.logFile.Name())
 
 	// Should have logged the chunk before error
 	if !strings.Contains(string(content), "data: chunk1") {
@@ -495,8 +491,7 @@ func TestProxyHandler_StreamingWriteError(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 
 	// 验证错误被记录
-	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
-	content, _ := os.ReadFile(logFile)
+	content, _ := os.ReadFile(logger.logFile.Name())
 
 	if !strings.Contains(string(content), "error") {
 		t.Error("Expected write error to be logged")
@@ -537,8 +532,7 @@ func TestProxyHandler_RegularResponseReadError(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 
 	// 验证错误被记录
-	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
-	content, _ := os.ReadFile(logFile)
+	content, _ := os.ReadFile(logger.logFile.Name())
 
 	// Should have an error logged or bad gateway response
 	if rr.Code != http.StatusBadGateway && !strings.Contains(string(content), "error") {
@@ -577,8 +571,7 @@ func TestProxyHandler_RegularResponseWriteError(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 
 	// 验证错误被记录
-	logFile := filepath.Join(tempDir, "llm_proxy_"+time.Now().Format("2006-01-02")+".log")
-	content, _ := os.ReadFile(logFile)
+	content, _ := os.ReadFile(logger.logFile.Name())
 
 	if !strings.Contains(string(content), "error") {
 		t.Error("Expected write error to be logged")
