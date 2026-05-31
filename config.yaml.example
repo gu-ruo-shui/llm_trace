@@ -1,0 +1,5 @@
+server_port: ":8080"
+target_url: "https://api.aicodewith.com"
+log_dir: "./logs"
+db_path: "./logs/proxy.db"
+use_db: false

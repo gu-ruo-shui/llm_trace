@@ -44,6 +44,10 @@ debug
 *.log
 logs/
 
+# Local config files
+config.json
+config.yaml
+
 # Temporary files
 *.tmp
 *.temp

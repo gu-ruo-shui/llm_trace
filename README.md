@@ -82,7 +82,9 @@ llm_reverse/
 ├── proxy/
 │   ├── handler.go    # 代理请求处理
 │   └── logger.go     # 日志记录
-├── logs/             # 日志文件目录
+├── logs/             # 日志文件目录（本地生成，git 忽略）
+├── config.json.example  # JSON 配置示例
+├── config.yaml.example  # YAML 配置示例
 ├── go.mod            # Go 模块文件
 └── README.md         # 本文件
 ```

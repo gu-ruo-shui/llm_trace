@@ -27,7 +27,7 @@ go test -run TestName ./...    # Run specific test
 ### Run
 ```bash
 ./llm_proxy                    # Run with default config
-CONFIG_FILE=config.yaml ./llm_proxy  # Use YAML config
+CONFIG_FILE=config.yaml.example ./llm_proxy  # Use YAML config
 USE_DB=true ./llm_proxy        # Enable database logging
 ```
 
@@ -48,7 +48,7 @@ USE_DB=true ./llm_proxy        # Enable database logging
 3. **Configuration** (`config/` package):
    - Supports JSON/YAML files with environment variable overrides
    - Key settings: SERVER_PORT, TARGET_URL, LOG_DIR, DB_PATH, USE_DB
-   - Loads from `config.json` by default, override with CONFIG_FILE env var
+   - Loads from `config.json` by default, override with `CONFIG_FILE` env var; commit only `config.json.example` / `config.yaml.example`
 
 ### Request Flow
 
