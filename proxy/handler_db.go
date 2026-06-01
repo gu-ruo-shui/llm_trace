@@ -45,7 +45,7 @@ func (p *ProxyHandlerDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	proxyReq, err := http.NewRequest(r.Method, proxyURL, bytes.NewReader(reqBody))
 	if err != nil {
-		p.logger.LogError(logEntry, err)
+		p.logErrorWithDuration(logEntry, err, startTime)
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		return
 	}
@@ -62,14 +62,11 @@ func (p *ProxyHandlerDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := client.Do(proxyReq)
 	if err != nil {
-		p.logger.LogError(logEntry, err)
+		p.logErrorWithDuration(logEntry, err, startTime)
 		http.Error(w, "Failed to proxy request", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
-
-	// Calculate duration
-	duration := time.Since(startTime)
 
 	// Check if this is a streaming response
 	isStream := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") ||
@@ -87,92 +84,98 @@ func (p *ProxyHandlerDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if isStream {
 		// Handle streaming response
-		p.handleStreamingResponse(w, resp, logEntry, duration)
+		p.handleStreamingResponse(w, resp, logEntry, startTime)
 	} else {
 		// Handle regular response
-		p.handleRegularResponse(w, resp, logEntry, duration)
+		p.handleRegularResponse(w, resp, logEntry, startTime)
 	}
 }
 
-func (p *ProxyHandlerDB) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, logEntry *DatabaseRequestLog, startDuration time.Duration) {
+func (p *ProxyHandlerDB) logErrorWithDuration(logEntry *DatabaseRequestLog, err error, startTime time.Time) {
+	if logEntry == nil {
+		return
+	}
+	logEntry.Duration = time.Since(startTime).Milliseconds()
+	p.logger.LogError(logEntry, err)
+}
+
+func (p *ProxyHandlerDB) handleStreamingResponse(w http.ResponseWriter, resp *http.Response, logEntry *DatabaseRequestLog, startTime time.Time) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		p.logErrorWithDuration(logEntry, http.ErrNotSupported, startTime)
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 		return
 	}
 
 	reader := bufio.NewReader(resp.Body)
 	var streamBuffer bytes.Buffer
+	parser := &sseEventParser{}
 	sequence := 0
 
 	for {
 		line, err := reader.ReadBytes('\n')
-		if err != nil {
-			if err != io.EOF {
-				p.logger.LogError(logEntry, err)
+		if len(line) > 0 {
+			// Write to response first so streaming clients receive chunks immediately.
+			if _, writeErr := w.Write(line); writeErr != nil {
+				p.logErrorWithDuration(logEntry, writeErr, startTime)
+				break
 			}
-			break
-		}
+			flusher.Flush()
 
-		// Write to response
-		if _, writeErr := w.Write(line); writeErr != nil {
-			p.logger.LogError(logEntry, writeErr)
-			break
-		}
-		flusher.Flush()
+			// Accumulate the exact upstream stream for the final request log.
+			streamBuffer.Write(line)
 
-		// Accumulate for logging
-		streamBuffer.Write(line)
-
-		// Parse and log SSE events
-		lineStr := string(line)
-		if strings.HasPrefix(lineStr, "event: ") {
-			eventType := strings.TrimSpace(strings.TrimPrefix(lineStr, "event: "))
-			// Look for the next data line
-			dataLine, err := reader.ReadBytes('\n')
-			if err == nil && strings.HasPrefix(string(dataLine), "data: ") {
-				// Write the data line to response too
-				if _, writeErr := w.Write(dataLine); writeErr != nil {
-					p.logger.LogError(logEntry, writeErr)
-					break
-				}
-				flusher.Flush()
-				streamBuffer.Write(dataLine)
-
-				dataContent := strings.TrimSpace(strings.TrimPrefix(string(dataLine), "data: "))
-				p.logger.LogSSEEvent(logEntry.RequestUUID, eventType, dataContent, sequence)
+			// Parse SSE incrementally without assuming an `event:` line. Data-only
+			// streams are valid SSE and are recorded as `message` events.
+			if event, ok := parser.ProcessLine(string(line)); ok {
+				p.logger.LogSSEEvent(logEntry.RequestUUID, event.EventType, event.Data, sequence)
 				sequence++
 			}
 		}
+
+		if err != nil {
+			if err != io.EOF {
+				p.logErrorWithDuration(logEntry, err, startTime)
+			}
+			break
+		}
 	}
 
-	// Process SSE events and store as JSON response
-	processedSSE, err := p.logger.ProcessSSEEvents(logEntry.RequestUUID)
-	if err == nil {
-		processedJSON, _ := json.Marshal(processedSSE)
-		logEntry.Response = string(processedJSON)
-	} else {
-		logEntry.Response = streamBuffer.String()
+	// Dispatch a final event if the upstream ended without the SSE blank-line
+	// delimiter. This protects data-only streams and truncated-but-readable data.
+	if event, ok := parser.Flush(); ok {
+		p.logger.LogSSEEvent(logEntry.RequestUUID, event.EventType, event.Data, sequence)
 	}
 
-	// Log final response
-	finalDuration := time.Since(time.Now().Add(-startDuration))
-	p.logger.LogResponse(logEntry, resp, []byte(logEntry.Response), true, finalDuration)
+	// Preserve the raw stream in request_logs. If the Anthropic-style event
+	// processor produced useful derived text/tool data, keep the prior processed
+	// JSON behavior; otherwise do not replace the raw stream with an empty object.
+	logResponse := streamBuffer.String()
+	if processedSSE, err := p.logger.ProcessSSEEvents(logEntry.RequestUUID); err == nil &&
+		(processedSSE.ToolName != "" || processedSSE.ProcessedText != "") {
+		if processedJSON, marshalErr := json.Marshal(processedSSE); marshalErr == nil {
+			logResponse = string(processedJSON)
+		}
+	}
+	logEntry.Response = logResponse
+
+	// Log final response with full streaming duration, including body read/write.
+	p.logger.LogResponse(logEntry, resp, []byte(logResponse), true, time.Since(startTime))
 }
 
-func (p *ProxyHandlerDB) handleRegularResponse(w http.ResponseWriter, resp *http.Response, logEntry *DatabaseRequestLog, duration time.Duration) {
+func (p *ProxyHandlerDB) handleRegularResponse(w http.ResponseWriter, resp *http.Response, logEntry *DatabaseRequestLog, startTime time.Time) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		p.logger.LogError(logEntry, err)
+		p.logErrorWithDuration(logEntry, err, startTime)
 		return
 	}
 
 	// Write response
 	if _, err := w.Write(body); err != nil {
-		p.logger.LogError(logEntry, err)
+		p.logErrorWithDuration(logEntry, err, startTime)
 		return
 	}
 
-	// Log response
-	p.logger.LogResponse(logEntry, resp, body, false, duration)
+	// Log response with duration after the response body has been read and written.
+	p.logger.LogResponse(logEntry, resp, body, false, time.Since(startTime))
 }

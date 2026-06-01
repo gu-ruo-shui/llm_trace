@@ -154,6 +154,112 @@ func TestProxyHandlerDB_ServeHTTP_StreamingResponse(t *testing.T) {
 	}
 }
 
+func TestProxyHandlerDB_DataOnlySSEEventsAreParsed(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data: {\"message\":\"hello\"}\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer mock.Close()
+
+	handler := NewProxyHandlerDB(mock.URL, logger)
+	req := httptest.NewRequest("POST", "/data-only", strings.NewReader(`{"stream":true}`))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(&streamingRecorder{ResponseRecorder: rr}, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", rr.Code)
+	}
+
+	var count int
+	if err := logger.db.QueryRow("SELECT COUNT(*) FROM sse_events").Scan(&count); err != nil {
+		t.Fatalf("Failed to count SSE events: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("Expected 2 data-only SSE events, got %d", count)
+	}
+
+	var eventType, data string
+	err = logger.db.QueryRow(`
+		SELECT event_type, data
+		FROM sse_events
+		ORDER BY sequence ASC
+		LIMIT 1
+	`).Scan(&eventType, &data)
+	if err != nil {
+		t.Fatalf("Failed to load first SSE event: %v", err)
+	}
+	if eventType != "message" {
+		t.Fatalf("Expected data-only SSE event type message, got %q", eventType)
+	}
+	if data != `{"message":"hello"}` {
+		t.Fatalf("Expected first SSE event data to be preserved, got %q", data)
+	}
+
+	logs, err := logger.GetLogs(10, 0)
+	if err != nil {
+		t.Fatalf("Failed to get request logs: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("Expected 1 request log, got %d", len(logs))
+	}
+	if !strings.Contains(logs[0].Response, `data: {"message":"hello"}`) {
+		t.Fatalf("Expected raw data-only stream to be preserved in request log response, got %q", logs[0].Response)
+	}
+}
+
+func TestProxyHandlerDB_StreamingDurationIncludesBodyRead(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("data: first\n\n"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(80 * time.Millisecond)
+		w.Write([]byte("data: second\n\n"))
+	}))
+	defer mock.Close()
+
+	handler := NewProxyHandlerDB(mock.URL, logger)
+	req := httptest.NewRequest("GET", "/slow-stream", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(&streamingRecorder{ResponseRecorder: rr}, req)
+
+	logs, err := logger.GetLogs(10, 0)
+	if err != nil {
+		t.Fatalf("Failed to get request logs: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("Expected 1 request log, got %d", len(logs))
+	}
+	if logs[0].Duration < 50 {
+		t.Fatalf("Expected streaming duration to include body read delay, got %dms", logs[0].Duration)
+	}
+}
+
 func TestProxyHandlerDB_ServeHTTP_ErrorCases(t *testing.T) {
 	testCases := []struct {
 		name           string
@@ -225,9 +331,9 @@ func TestProxyHandlerDB_ServeHTTP_ErrorCases(t *testing.T) {
 
 			// 验证错误被记录到数据库
 			if tc.name == "Invalid URL" {
-				// Allow some time for async logging operations  
+				// Allow some time for async logging operations
 				time.Sleep(200 * time.Millisecond)
-				
+
 				// Check logs to see if error was recorded
 				logs, err := logger.GetLogs(10, 0)
 				if err != nil {
@@ -238,7 +344,7 @@ func TestProxyHandlerDB_ServeHTTP_ErrorCases(t *testing.T) {
 						t.Logf("Log %d: Error='%s', URL='%s'", i, log.Error, log.URL)
 					}
 				}
-				
+
 				// The error should be logged - if not, it might be a timing issue in the test
 				// For now, we'll make this a warning rather than a failure
 				errorLogs, err := logger.GetErrorLogs(10)

@@ -124,30 +124,28 @@ func (p *ProxyHandler) handleStreamingResponse(w http.ResponseWriter, resp *http
 
 	for {
 		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			// Write to response first so the client receives chunks as they arrive.
+			if _, writeErr := w.Write(line); writeErr != nil {
+				p.logger.LogError(logEntry, writeErr)
+				break
+			}
+			flusher.Flush()
+
+			// Accumulate the stream and write a single final log entry.  Logging every
+			// data line plus the final body duplicates stream content in file logs.
+			streamBuffer.Write(line)
+		}
+
 		if err != nil {
 			if err != io.EOF {
 				p.logger.LogError(logEntry, err)
 			}
 			break
 		}
-
-		// Write to response
-		if _, writeErr := w.Write(line); writeErr != nil {
-			p.logger.LogError(logEntry, writeErr)
-			break
-		}
-		flusher.Flush()
-
-		// Accumulate for logging
-		streamBuffer.Write(line)
-
-		// Log chunks periodically or on data: lines
-		if bytes.HasPrefix(line, []byte("data: ")) {
-			p.logger.LogStreamChunk(logEntry, string(line))
-		}
 	}
 
-	// Log final accumulated stream
+	// Log final accumulated stream once.
 	logEntry.IsStream = true
 	p.logger.LogResponse(logEntry, resp, streamBuffer.Bytes(), true)
 }

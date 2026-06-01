@@ -177,6 +177,44 @@ func TestProxyHandler_ServeHTTP_StreamingResponse(t *testing.T) {
 	}
 }
 
+func TestProxyHandler_StreamingLogsFinalResponseOnly(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	mock := newMockServer()
+	defer mock.Close()
+
+	mock.addResponse("/stream", &mockResponse{
+		statusCode: http.StatusOK,
+		headers:    map[string]string{"Content-Type": "text/event-stream"},
+		body:       "data: chunk1\n\ndata: chunk2\n\n",
+		stream:     true,
+	})
+
+	handler := NewProxyHandler(mock.URL, logger)
+	req := httptest.NewRequest("POST", "/stream", strings.NewReader(`{"stream":true}`))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(&streamingRecorder{ResponseRecorder: rr}, req)
+
+	contentBytes, err := os.ReadFile(logger.logFile.Name())
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+	content := string(contentBytes)
+
+	logLines := strings.Split(strings.TrimSpace(content), "\n")
+	if len(logLines) != 1 {
+		t.Fatalf("Expected one final stream log entry, got %d: %s", len(logLines), content)
+	}
+	if strings.Count(content, "data: chunk1") != 1 || strings.Count(content, "data: chunk2") != 1 {
+		t.Fatalf("Expected each stream chunk to appear once in file logs, got: %s", content)
+	}
+}
+
 func TestProxyHandler_ServeHTTP_ErrorCases(t *testing.T) {
 	testCases := []struct {
 		name           string
