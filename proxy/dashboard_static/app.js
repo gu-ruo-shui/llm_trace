@@ -96,11 +96,57 @@ function isObj(v){return v && typeof v==='object' && !Array.isArray(v)}
 function field(obj,names){if(!isObj(obj))return undefined; for(var i=0;i<names.length;i++){if(obj[names[i]]!==undefined)return obj[names[i]]} return undefined}
 function compact(arr){var out=[]; for(var i=0;i<arr.length;i++){if(arr[i]!==undefined && arr[i]!==null && arr[i]!=='' ) out.push(arr[i])} return out}
 function copyId(text){copyBag.push(String(text==null?'':text)); return copyBag.length-1}
-function copyStored(id){
-  var text=copyBag[id]||'';
-  if(navigator.clipboard && navigator.clipboard.writeText){navigator.clipboard.writeText(text)}
+function fallbackCopyText(text){
+  var ta=document.createElement('textarea');
+  ta.value=text;
+  ta.setAttribute('readonly','');
+  ta.style.position='fixed';
+  ta.style.left='-9999px';
+  ta.style.top='0';
+  document.body.appendChild(ta);
+  ta.select();
+  try{
+    var ok=document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok ? Promise.resolve() : Promise.reject(new Error('copy failed'));
+  }catch(e){
+    document.body.removeChild(ta);
+    return Promise.reject(e);
+  }
 }
-function copyButton(text,label){return '<button class="ghost" onclick="event.stopPropagation();copyStored('+copyId(text)+')">'+escapeHtml(label||'Copy')+'</button>'}
+function writeClipboard(text){
+  if(navigator.clipboard && navigator.clipboard.writeText){return navigator.clipboard.writeText(text)}
+  return fallbackCopyText(text);
+}
+function setCopyButtonState(btn,state,text){
+  if(!btn) return;
+  var original=btn.getAttribute('data-label') || 'Copy';
+  if(btn._copyTimer) clearTimeout(btn._copyTimer);
+  btn.classList.remove('copied','copyFailed');
+  if(state){btn.classList.add(state)}
+  btn.textContent=text;
+  btn._copyTimer=setTimeout(function(){
+    btn.classList.remove('copied','copyFailed');
+    btn.textContent=original;
+    btn._copyTimer=null;
+  },1400);
+}
+function copyStored(id,btn){
+  var text=copyBag[id]||'';
+  if(btn){
+    btn.classList.remove('copied','copyFailed');
+    btn.classList.add('copying');
+    btn.textContent='Copying...';
+  }
+  writeClipboard(text).then(function(){
+    if(btn) btn.classList.remove('copying');
+    setCopyButtonState(btn,'copied','Copied ✓');
+  }).catch(function(){
+    if(btn) btn.classList.remove('copying');
+    setCopyButtonState(btn,'copyFailed','Copy failed');
+  });
+}
+function copyButton(text,label){label=label||'Copy'; return '<button class="ghost copyBtn" data-label="'+escapeHtml(label)+'" onclick="event.stopPropagation();copyStored('+copyId(text)+',this)">'+escapeHtml(label)+'</button>'}
 
 async function refreshLatest(){await loadAll(false)}
 async function loadAll(selectNewest){
@@ -490,12 +536,14 @@ function renderFoldSection(title,meta,body,opts){
   var bodyClasses='sectionBody'+(opts.noMax?' noMax':'');
   var open=opts.open===true?' open':'';
   var metaHtml=meta?'<span class="sectionMeta">'+escapeHtml(meta)+'</span>':'';
-  return '<details class="'+classes+'"'+open+'><summary class="sectionHead"><span class="sectionHeadTitle"><span class="foldCaret" aria-hidden="true"></span><span class="sectionTitle">'+escapeHtml(title)+'</span></span>'+metaHtml+'</summary><div class="'+bodyClasses+'">'+body+'</div></details>';
+  var copyHtml=opts.copyText!==undefined?copyButton(opts.copyText,opts.copyLabel||'Copy'):'';
+  var actionsHtml=(metaHtml||copyHtml)?'<span class="sectionHeadActions">'+metaHtml+copyHtml+'</span>':'';
+  return '<details class="'+classes+'"'+open+'><summary class="sectionHead"><span class="sectionHeadTitle"><span class="foldCaret" aria-hidden="true"></span><span class="sectionTitle">'+escapeHtml(title)+'</span></span>'+actionsHtml+'</summary><div class="'+bodyClasses+'">'+body+'</div></details>';
 }
 function renderModern(trace){
   var req=trace.request, resp=trace.response;
   return '<div class="tracegrid">'
-    +renderFoldSection('Request trace',req.messages.length+' messages • '+req.tools.length+' tools','<div class="stack">'+renderSettings(req,trace)+renderSystem(req)+renderMessages(req.messages)+'</div>',{noMax:true})
+    +renderFoldSection('Request trace',req.messages.length+' messages • '+req.tools.length+' tools','<div class="stack">'+renderSettings(req,trace)+renderSystem(req)+renderMessages(req.messages)+'</div>',{noMax:true,copyText:trace.raw.requestText,copyLabel:'Copy request body'})
     +renderFoldSection('Response trace',trace.log.is_stream?trace.events.length+' stream events':'HTTP response','<div class="stack">'+renderResponse(resp,trace)+'</div>',{noMax:true})
     +renderFoldSection('Tools available to the model','request tool schemas',renderTools(req.tools),{full:true,noMax:true})
     +renderFoldSection('Stream timeline','raw events grouped by sequence',renderCompactEvents(trace.events),{full:true})
@@ -504,7 +552,8 @@ function renderModern(trace){
 function renderSettings(req,trace){
   var rows=[]; if(req.model) rows.push(['model',req.model]); rows.push(['provider',trace.provider]); rows.push(['url',trace.log.url]);
   Object.keys(req.settings).forEach(function(k){rows.push([k,typeof req.settings[k]==='string'?req.settings[k]:JSON.stringify(req.settings[k])])});
-  return renderFoldSection('Model request','','<div class="kv">'+rows.map(function(r){return '<div>'+escapeHtml(r[0])+'</div><div>'+escapeHtml(r[1])+'</div>'}).join('')+'</div>');
+  var copyText=rows.map(function(r){return r[0]+': '+r[1]}).join('\n');
+  return renderFoldSection('Model request','','<div class="kv">'+rows.map(function(r){return '<div>'+escapeHtml(r[0])+'</div><div>'+escapeHtml(r[1])+'</div>'}).join('')+'</div>',{copyText:copyText,copyLabel:'Copy request'});
 }
 function renderSystem(req){
   if(!req.system.length) return '';
@@ -518,22 +567,33 @@ function renderMessages(messages){
     return renderMessageBlock(m,roleClass,meta);
   }).join('');
 }
+function messageCopyText(m){
+  if(m && m.raw!==undefined) return pretty(m.raw);
+  return asArray(m && m.parts).map(function(p){return partCopyText(p)}).filter(Boolean).join('\n\n');
+}
+function partCopyText(p){
+  if(!p) return '';
+  if(p.json!==undefined) return pretty(p.json);
+  if(p.text!==undefined && p.text!==null) return String(p.text);
+  return '';
+}
+function toolCopyText(t){return pretty((t && (t.schema || t.raw)) || t || '')}
 function renderMessageBlock(m,roleClass,metaHtml){
   var partCount=(m.parts&&m.parts.length)||0;
   var countLabel=partCount ? '<span class="muted foldHint">'+partCount+' part'+(partCount===1?'':'s')+'</span>' : '<span class="muted foldHint">empty</span>';
-  return '<details class="message foldable"><summary class="messageTop"><span class="role '+roleClass+'">'+escapeHtml(m.role)+'</span>'+(metaHtml||'')+countLabel+'</summary><div class="messageBody">'+renderParts(m.parts)+'</div></details>';
+  return '<details class="message foldable"><summary class="messageTop"><span class="role '+roleClass+'">'+escapeHtml(m.role)+'</span>'+(metaHtml||'')+countLabel+copyButton(messageCopyText(m),'Copy')+'</summary><div class="messageBody">'+renderParts(m.parts)+'</div></details>';
 }
 function renderParts(parts){
   if(!parts || !parts.length) return '<span class="muted">empty</span>';
   return parts.map(function(p){
     var cls='part'; if(p.type==='text') cls+=' textpart'; else if(p.type==='tool_call') cls+=' toolcall'; else if(p.type==='tool_result' || p.type==='tool_result_meta') cls+=' toolresult'; else if(p.type==='reasoning') cls+=' reasoning'; else if(p.type==='image') cls+=' image';
     var head=p.type || 'content'; if(p.name) head+=' • '+p.name; if(p.id) head+=' • '+p.id;
-    return '<div class="'+cls+'"><div class="partHead">'+escapeHtml(head)+'</div>'+renderMaybeJSON(p.text||'',{pre:false,controls:true,openDepth:1})+'</div>';
+    return '<div class="'+cls+'"><div class="partHead"><span>'+escapeHtml(head)+'</span>'+copyButton(partCopyText(p),'Copy')+'</div>'+renderMaybeJSON(p.text||'',{pre:false,controls:true,openDepth:1})+'</div>';
   }).join('');
 }
 function renderTools(tools){
   if(!tools.length) return '<div class="empty">No tool schemas in this request.</div>';
-  return '<div class="stack">'+tools.map(function(t){return '<div class="toolCard"><div class="toolCardTop"><div><div class="toolName">'+escapeHtml(t.name)+'</div>'+(t.description?'<div class="toolDesc">'+escapeHtml(t.description)+'</div>':'')+'</div><span class="chip dim">'+escapeHtml(t.type||'tool')+'</span></div><div class="toolBody"><details><summary class="muted">schema</summary>'+renderMaybeJSON(t.schema||t.raw,{openDepth:2})+'</details></div></div>'}).join('')+'</div>';
+  return '<div class="stack">'+tools.map(function(t){return '<div class="toolCard"><div class="toolCardTop"><div><div class="toolName">'+escapeHtml(t.name)+'</div>'+(t.description?'<div class="toolDesc">'+escapeHtml(t.description)+'</div>':'')+'</div><div class="toolCardActions"><span class="chip dim">'+escapeHtml(t.type||'tool')+'</span>'+copyButton(toolCopyText(t),'Copy schema')+'</div></div><div class="toolBody"><details><summary class="muted">schema '+copyButton(toolCopyText(t),'Copy')+'</summary>'+renderMaybeJSON(t.schema||t.raw,{openDepth:2})+'</details></div></div>'}).join('')+'</div>';
 }
 function renderResponse(resp,trace){
   var html='';
@@ -552,11 +612,11 @@ function renderCompactEvents(events){
   if(!events.length) return '<div class="empty">No SSE events captured for this request.</div>';
   var counts={}; events.forEach(function(e){counts[e.event_type]=(counts[e.event_type]||0)+1});
   var chips=Object.keys(counts).map(function(k){return '<span class="chip">'+escapeHtml(k)+' '+counts[k]+'</span>'}).join('');
-  return '<div class="eventStats">'+chips+'</div><div style="height:12px"></div><div class="stack">'+events.map(function(e){return '<div class="event"><details><summary>#'+escapeHtml(e.sequence)+' '+escapeHtml(e.event_type)+' <span class="tiny">'+fmtTime(e.timestamp)+'</span> '+copyButton(eventToSSE(e),'Copy event')+'</summary><div class="eventBody">'+renderMaybeJSON(e.data,{pretty:true,openDepth:1})+'</div></details></div>'}).join('')+'</div>';
+  return '<div class="eventStats">'+chips+'</div><div style="height:12px"></div><div class="stack">'+events.map(function(e){return '<div class="event"><details><summary>#'+escapeHtml(e.sequence)+' '+escapeHtml(e.event_type)+' <span class="tiny">'+fmtTime(e.timestamp)+'</span> '+copyButton(eventToSSE(e),'Copy')+'</summary><div class="eventBody">'+renderMaybeJSON(e.data,{pretty:true,openDepth:1})+'</div></details></div>'}).join('')+'</div>';
 }
 function renderRaw(trace){
   var events=trace.events;
-  var eventDetails=events.map(function(e){return '<details class="event"><summary>#'+escapeHtml(e.sequence)+' '+escapeHtml(e.event_type)+' <span class="tiny">'+fmtTime(e.timestamp)+'</span> '+copyButton(eventToSSE(e),'Copy event')+'</summary><div class="eventBody">'+renderMaybeJSON(e.data,{pretty:true,openDepth:1})+'</div></details>'}).join('');
+  var eventDetails=events.map(function(e){return '<details class="event"><summary>#'+escapeHtml(e.sequence)+' '+escapeHtml(e.event_type)+' <span class="tiny">'+fmtTime(e.timestamp)+'</span> '+copyButton(eventToSSE(e),'Copy')+'</summary><div class="eventBody">'+renderMaybeJSON(e.data,{pretty:true,openDepth:1})+'</div></details>'}).join('');
   return '<div class="rawgrid">'
     +'<details class="rawBlock"><summary>Original request headers '+copyButton(trace.raw.headersText,'Copy')+'</summary><div class="rawInner">'+renderMaybeJSON(trace.raw.headersText,{pretty:true,openDepth:2})+'</div></details>'
     +'<details class="rawBlock"><summary>Original request body '+copyButton(trace.raw.requestText,'Copy')+'</summary><div class="rawInner">'+renderMaybeJSON(trace.raw.requestText,{pretty:true,openDepth:2})+'</div></details>'
