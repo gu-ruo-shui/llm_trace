@@ -91,7 +91,7 @@ func (l *Logger) LogResponse(log *RequestLog, resp *http.Response, body []byte, 
 	if resp != nil {
 		log.ResponseCode = resp.StatusCode
 	}
-	log.Response = string(body)
+	log.Response = formatResponseBodyForLog(resp, body)
 	log.IsStream = isStream
 	l.writeLog(log)
 }

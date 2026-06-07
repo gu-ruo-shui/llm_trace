@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -151,6 +152,88 @@ func TestProxyHandlerDB_ServeHTTP_StreamingResponse(t *testing.T) {
 
 	if streamLogs == 0 {
 		t.Error("Expected to find stream logs in database")
+	}
+}
+
+func TestProxyHandlerDB_StreamingResponseStitchedIntoRequestLog(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		chunks := []string{
+			"event: response.output_item.added\n" +
+				"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"bash\"}}\n\n",
+			"event: response.output_text.delta\n" +
+				"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello \"}\n\n",
+			"event: response.output_text.delta\n" +
+				"data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n",
+			"event: response.completed\n" +
+				"data: {\"type\":\"response.completed\"}\n\n",
+		}
+		for _, chunk := range chunks {
+			_, _ = w.Write([]byte(chunk))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}))
+	defer mock.Close()
+
+	handler := NewProxyHandlerDB(mock.URL, logger)
+	req := httptest.NewRequest("POST", "/responses", strings.NewReader(`{"stream":true}`))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(&streamingRecorder{ResponseRecorder: rr}, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "response.output_text.delta") {
+		t.Fatalf("Expected SSE response to be proxied to client, got %q", rr.Body.String())
+	}
+
+	logs, err := logger.GetLogs(10, 0)
+	if err != nil {
+		t.Fatalf("Failed to get request logs: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("Expected 1 request log, got %d", len(logs))
+	}
+	if !logs[0].IsStream {
+		t.Fatalf("Expected request log to be marked as stream")
+	}
+	if logs[0].Response == "" {
+		t.Fatalf("Expected stitched SSE response in request_logs.response, got empty response")
+	}
+	if !strings.Contains(logs[0].Response, "Hello world") {
+		t.Fatalf("Expected stitched output text in request log response, got %q", logs[0].Response)
+	}
+	if !strings.Contains(logs[0].Response, "bash") {
+		t.Fatalf("Expected streamed tool name in request log response, got %q", logs[0].Response)
+	}
+
+	var rowCount int
+	if err := logger.db.QueryRow("SELECT COUNT(*) FROM request_logs WHERE request_uuid = ?", logs[0].RequestUUID).Scan(&rowCount); err != nil {
+		t.Fatalf("Failed to count request log rows: %v", err)
+	}
+	if rowCount != 1 {
+		t.Fatalf("Expected one request_logs row for stream request, got %d", rowCount)
+	}
+
+	var dbResponse sql.NullString
+	if err := logger.db.QueryRow("SELECT response FROM request_logs WHERE request_uuid = ?", logs[0].RequestUUID).Scan(&dbResponse); err != nil {
+		t.Fatalf("Failed to load stored response: %v", err)
+	}
+	if !dbResponse.Valid || dbResponse.String == "" {
+		t.Fatalf("Expected non-null response in database, got valid=%v value=%q", dbResponse.Valid, dbResponse.String)
 	}
 }
 

@@ -72,16 +72,6 @@ func (p *ProxyHandlerDB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	isStream := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") ||
 		strings.Contains(resp.Header.Get("Content-Type"), "application/stream+json")
 
-	// Copy response headers
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-
-	// Set status code
-	w.WriteHeader(resp.StatusCode)
-
 	if isStream {
 		// Handle streaming response
 		p.handleStreamingResponse(w, resp, logEntry, startTime)
@@ -107,7 +97,20 @@ func (p *ProxyHandlerDB) handleStreamingResponse(w http.ResponseWriter, resp *ht
 		return
 	}
 
-	reader := bufio.NewReader(resp.Body)
+	streamBody, decoded, err := newDecodedResponseReadCloser(resp)
+	if err != nil {
+		p.logErrorWithDuration(logEntry, err, startTime)
+		http.Error(w, "Failed to decode streaming response", http.StatusBadGateway)
+		return
+	}
+	if streamBody != resp.Body {
+		defer streamBody.Close()
+	}
+
+	copyResponseHeaders(w.Header(), resp.Header, decoded)
+	w.WriteHeader(resp.StatusCode)
+
+	reader := bufio.NewReader(streamBody)
 	var streamBuffer bytes.Buffer
 	parser := &sseEventParser{}
 	sequence := 0
@@ -160,15 +163,25 @@ func (p *ProxyHandlerDB) handleStreamingResponse(w http.ResponseWriter, resp *ht
 	logEntry.Response = logResponse
 
 	// Log final response with full streaming duration, including body read/write.
-	p.logger.LogResponse(logEntry, resp, []byte(logResponse), true, time.Since(startTime))
+	p.logger.LogResponse(logEntry, responseForBodyEncoding(resp, decoded), []byte(logResponse), true, time.Since(startTime))
 }
 
 func (p *ProxyHandlerDB) handleRegularResponse(w http.ResponseWriter, resp *http.Response, logEntry *DatabaseRequestLog, startTime time.Time) {
-	body, err := io.ReadAll(resp.Body)
+	rawBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		p.logErrorWithDuration(logEntry, err, startTime)
+		http.Error(w, "Failed to read upstream response", http.StatusBadGateway)
 		return
 	}
+
+	body := rawBody
+	decodedBody, decoded, err := decodeResponseBody(resp, rawBody)
+	if err == nil && decoded {
+		body = decodedBody
+	}
+
+	copyResponseHeaders(w.Header(), resp.Header, decoded)
+	w.WriteHeader(resp.StatusCode)
 
 	// Write response
 	if _, err := w.Write(body); err != nil {
@@ -177,5 +190,5 @@ func (p *ProxyHandlerDB) handleRegularResponse(w http.ResponseWriter, resp *http
 	}
 
 	// Log response with duration after the response body has been read and written.
-	p.logger.LogResponse(logEntry, resp, body, false, time.Since(startTime))
+	p.logger.LogResponse(logEntry, responseForBodyEncoding(resp, decoded), body, false, time.Since(startTime))
 }

@@ -93,16 +93,6 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	isStream := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") ||
 		strings.Contains(resp.Header.Get("Content-Type"), "application/stream+json")
 
-	// Copy response headers
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-
-	// Set status code
-	w.WriteHeader(resp.StatusCode)
-
 	if isStream {
 		// Handle streaming response
 		p.handleStreamingResponse(w, resp, logEntry)
@@ -119,7 +109,20 @@ func (p *ProxyHandler) handleStreamingResponse(w http.ResponseWriter, resp *http
 		return
 	}
 
-	reader := bufio.NewReader(resp.Body)
+	streamBody, decoded, err := newDecodedResponseReadCloser(resp)
+	if err != nil {
+		p.logger.LogError(logEntry, err)
+		http.Error(w, "Failed to decode streaming response", http.StatusBadGateway)
+		return
+	}
+	if streamBody != resp.Body {
+		defer streamBody.Close()
+	}
+
+	copyResponseHeaders(w.Header(), resp.Header, decoded)
+	w.WriteHeader(resp.StatusCode)
+
+	reader := bufio.NewReader(streamBody)
 	var streamBuffer bytes.Buffer
 
 	for {
@@ -147,15 +150,25 @@ func (p *ProxyHandler) handleStreamingResponse(w http.ResponseWriter, resp *http
 
 	// Log final accumulated stream once.
 	logEntry.IsStream = true
-	p.logger.LogResponse(logEntry, resp, streamBuffer.Bytes(), true)
+	p.logger.LogResponse(logEntry, responseForBodyEncoding(resp, decoded), streamBuffer.Bytes(), true)
 }
 
 func (p *ProxyHandler) handleRegularResponse(w http.ResponseWriter, resp *http.Response, logEntry *RequestLog) {
-	body, err := io.ReadAll(resp.Body)
+	rawBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		p.logger.LogError(logEntry, err)
+		http.Error(w, "Failed to read upstream response", http.StatusBadGateway)
 		return
 	}
+
+	body := rawBody
+	decodedBody, decoded, err := decodeResponseBody(resp, rawBody)
+	if err == nil && decoded {
+		body = decodedBody
+	}
+
+	copyResponseHeaders(w.Header(), resp.Header, decoded)
+	w.WriteHeader(resp.StatusCode)
 
 	// Write response
 	if _, err := w.Write(body); err != nil {
@@ -163,6 +176,7 @@ func (p *ProxyHandler) handleRegularResponse(w http.ResponseWriter, resp *http.R
 		return
 	}
 
-	// Log response
-	p.logger.LogResponse(logEntry, resp, body, false)
+	// Log response. If decoding failed, keep the raw response headers so the
+	// logger stores a base64 fallback instead of corrupting binary bytes.
+	p.logger.LogResponse(logEntry, responseForBodyEncoding(resp, decoded), body, false)
 }

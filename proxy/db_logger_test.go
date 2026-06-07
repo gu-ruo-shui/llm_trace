@@ -162,6 +162,61 @@ func TestDatabaseLogger_LogError(t *testing.T) {
 	}
 }
 
+func TestDatabaseLogger_LogErrorThenResponseUpdatesExistingRequestLog(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test.db")
+
+	logger, err := NewDatabaseLogger(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create database logger: %v", err)
+	}
+	defer logger.Close()
+
+	log := &DatabaseRequestLog{
+		RequestUUID: "uuid-stream-upsert-test",
+		Method:      "GET",
+		URL:         "/stream",
+		Timestamp:   time.Now(),
+	}
+
+	logger.LogError(log, fmt.Errorf("temporary stream write error"))
+	logger.LogResponse(log, &http.Response{StatusCode: http.StatusOK}, []byte("data: ok\n\n"), true, 25*time.Millisecond)
+
+	var count int
+	if err := logger.db.QueryRow("SELECT COUNT(*) FROM request_logs WHERE request_uuid = ?", log.RequestUUID).Scan(&count); err != nil {
+		t.Fatalf("Failed to count request logs: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Expected LogResponse to update the existing error row, got %d rows", count)
+	}
+
+	var response, errorMsg sql.NullString
+	var responseCode int
+	var isStream bool
+	if err := logger.db.QueryRow(`
+		SELECT response, error, response_code, is_stream
+		FROM request_logs
+		WHERE request_uuid = ?
+	`, log.RequestUUID).Scan(&response, &errorMsg, &responseCode, &isStream); err != nil {
+		t.Fatalf("Failed to load updated request log: %v", err)
+	}
+	if !response.Valid || response.String == "" {
+		t.Fatalf("Expected final stream response to be stored, got valid=%v value=%q", response.Valid, response.String)
+	}
+	if !strings.Contains(response.String, "data: ok") {
+		t.Fatalf("Expected stored response to contain accumulated stream, got %q", response.String)
+	}
+	if !errorMsg.Valid || errorMsg.String == "" {
+		t.Fatalf("Expected original stream error to remain on updated row")
+	}
+	if responseCode != http.StatusOK {
+		t.Fatalf("Expected response code 200, got %d", responseCode)
+	}
+	if !isStream {
+		t.Fatalf("Expected updated request log to be marked as stream")
+	}
+}
+
 func TestDatabaseLogger_LogStreamChunk(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test.db")
@@ -180,11 +235,11 @@ func TestDatabaseLogger_LogStreamChunk(t *testing.T) {
 	}
 
 	duration := 50 * time.Millisecond
-	
+
 	// LogStreamChunk is currently a no-op method for backward compatibility
 	// It doesn't write to the database, so we'll test that it doesn't crash
 	logger.LogStreamChunk(log, "data: test chunk\n", duration)
-	
+
 	// Since LogStreamChunk doesn't write to database, we'll verify no stream logs exist
 	var count int
 	err = logger.db.QueryRow("SELECT COUNT(*) FROM request_logs WHERE is_stream = 1").Scan(&count)
@@ -196,7 +251,7 @@ func TestDatabaseLogger_LogStreamChunk(t *testing.T) {
 	if count != 0 {
 		t.Errorf("Expected 0 stream logs since LogStreamChunk doesn't write to database, got %d", count)
 	}
-	
+
 	// Test that the method doesn't modify the log object
 	if log.Response != "" {
 		t.Errorf("Expected log.Response to remain empty, got %s", log.Response)

@@ -120,7 +120,7 @@ func (dl *DatabaseLogger) LogResponse(log *DatabaseRequestLog, resp *http.Respon
 	if resp != nil {
 		log.ResponseCode = resp.StatusCode
 	}
-	log.Response = string(body)
+	log.Response = formatResponseBodyForLog(resp, body)
 	log.IsStream = isStream
 	log.Duration = duration.Milliseconds()
 
@@ -152,6 +152,35 @@ func (dl *DatabaseLogger) LogStreamChunk(log *DatabaseRequestLog, chunk string, 
 }
 
 func (dl *DatabaseLogger) writeLog(log *DatabaseRequestLog) {
+	if log.RequestUUID != "" {
+		updateQuery := `
+		UPDATE request_logs
+		SET timestamp = ?, method = ?, url = ?, headers = ?, body = ?, response_code = ?, response = ?, is_stream = ?, error = ?, duration_ms = ?
+		WHERE request_uuid = ?
+		`
+
+		result, err := dl.db.Exec(updateQuery,
+			log.Timestamp,
+			log.Method,
+			log.URL,
+			log.Headers,
+			log.Body,
+			log.ResponseCode,
+			log.Response,
+			log.IsStream,
+			log.Error,
+			log.Duration,
+			log.RequestUUID,
+		)
+		if err != nil {
+			fmt.Printf("Failed to update log in database: %v\n", err)
+			return
+		}
+		if rowsAffected, err := result.RowsAffected(); err == nil && rowsAffected > 0 {
+			return
+		}
+	}
+
 	query := `
 	INSERT INTO request_logs (request_uuid, timestamp, method, url, headers, body, response_code, response, is_stream, error, duration_ms)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -219,39 +248,161 @@ func (dl *DatabaseLogger) ProcessSSEEvents(requestUUID string) (*ProcessedSSERes
 			continue
 		}
 
-		// Parse the JSON data
-		var eventData map[string]interface{}
-		if err := json.Unmarshal([]byte(data), &eventData); err != nil {
+		data = strings.TrimSpace(data)
+		if data == "" || data == "[DONE]" {
 			continue
 		}
 
-		// Extract tool name from content_block_start events
-		if eventType == "content_block_start" {
-			// Check for content_block.name (new format)
-			if contentBlock, ok := eventData["content_block"].(map[string]interface{}); ok {
-				if name, ok := contentBlock["name"].(string); ok {
-					processed.ToolName = name
-				}
+		var eventData map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &eventData); err != nil {
+			// Some providers stream data-only text. Preserve those chunks as
+			// processed text instead of returning an empty SSE summary.
+			if eventType == "message" {
+				textParts = append(textParts, data)
 			}
+			continue
 		}
 
-		// Extract text content from content_block_delta events
-		if eventType == "content_block_delta" {
-			if deltaInfo, ok := eventData["delta"].(map[string]interface{}); ok {
-				// For text content
-				if text, ok := deltaInfo["text"].(string); ok {
-					textParts = append(textParts, text)
-				}
-				// For partial JSON content (tool use parameters)
-				if partialJSON, ok := deltaInfo["partial_json"].(string); ok {
-					textParts = append(textParts, partialJSON)
-				}
-			}
-		}
+		updateProcessedToolName(processed, eventData)
+		textParts = append(textParts, extractProcessedTextParts(eventType, eventData)...)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	processed.ProcessedText = strings.Join(textParts, "")
 	return processed, nil
+}
+
+func updateProcessedToolName(processed *ProcessedSSEResponse, eventData map[string]interface{}) {
+	if processed == nil {
+		return
+	}
+
+	if contentBlock, ok := eventData["content_block"].(map[string]interface{}); ok {
+		if name, ok := contentBlock["name"].(string); ok && name != "" {
+			processed.ToolName = name
+		}
+	}
+
+	if item, ok := eventData["item"].(map[string]interface{}); ok {
+		if name, ok := item["name"].(string); ok && name != "" {
+			processed.ToolName = name
+		}
+	}
+
+	if name, ok := eventData["name"].(string); ok && name != "" {
+		processed.ToolName = name
+	}
+
+	for _, choice := range asMapSlice(eventData["choices"]) {
+		delta, _ := choice["delta"].(map[string]interface{})
+		for _, toolCall := range asMapSlice(delta["tool_calls"]) {
+			function, _ := toolCall["function"].(map[string]interface{})
+			if name, ok := function["name"].(string); ok && name != "" {
+				processed.ToolName = name
+			}
+		}
+	}
+}
+
+func extractProcessedTextParts(eventType string, eventData map[string]interface{}) []string {
+	var parts []string
+
+	if delta, ok := eventData["delta"].(map[string]interface{}); ok {
+		appendStringField(&parts, delta, "text")
+		appendStringField(&parts, delta, "content")
+		appendStringField(&parts, delta, "partial_json")
+	}
+
+	// OpenAI Responses API emits string deltas for output text, reasoning
+	// summaries, and function-call arguments.
+	streamEventType := eventType
+	if typeValue, ok := eventData["type"].(string); ok && typeValue != "" {
+		streamEventType = typeValue
+	}
+	if delta, ok := eventData["delta"].(string); ok && delta != "" && strings.Contains(streamEventType, ".delta") {
+		parts = append(parts, delta)
+	}
+
+	// OpenAI Chat Completions-compatible streams emit data-only JSON with
+	// choices[].delta.content and choices[].delta.tool_calls[].function.arguments.
+	for _, choice := range asMapSlice(eventData["choices"]) {
+		if delta, ok := choice["delta"].(map[string]interface{}); ok {
+			appendStringField(&parts, delta, "content")
+			appendStringField(&parts, delta, "reasoning_content")
+			for _, toolCall := range asMapSlice(delta["tool_calls"]) {
+				function, _ := toolCall["function"].(map[string]interface{})
+				appendStringField(&parts, function, "arguments")
+			}
+		}
+		if message, ok := choice["message"].(map[string]interface{}); ok {
+			appendStringField(&parts, message, "content")
+		}
+	}
+
+	// Gemini-style streams may send candidates[].content.parts[].text.
+	for _, candidate := range asMapSlice(eventData["candidates"]) {
+		content, _ := candidate["content"].(map[string]interface{})
+		for _, part := range asMapSlice(content["parts"]) {
+			appendStringField(&parts, part, "text")
+		}
+	}
+
+	return parts
+}
+
+func appendStringField(parts *[]string, values map[string]interface{}, key string) {
+	if values == nil {
+		return
+	}
+	if value, ok := values[key].(string); ok && value != "" {
+		*parts = append(*parts, value)
+	}
+}
+
+func asMapSlice(value interface{}) []map[string]interface{} {
+	items, ok := value.([]interface{})
+	if !ok {
+		return nil
+	}
+
+	maps := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		if itemMap, ok := item.(map[string]interface{}); ok {
+			maps = append(maps, itemMap)
+		}
+	}
+	return maps
+}
+
+func scanRequestLog(row interface {
+	Scan(dest ...interface{}) error
+}) (DatabaseRequestLog, error) {
+	var log DatabaseRequestLog
+	var headers, body, response, errorMsg sql.NullString
+	err := row.Scan(
+		&log.ID,
+		&log.RequestUUID,
+		&log.Timestamp,
+		&log.Method,
+		&log.URL,
+		&headers,
+		&body,
+		&log.ResponseCode,
+		&response,
+		&log.IsStream,
+		&errorMsg,
+		&log.Duration,
+	)
+	if err != nil {
+		return log, err
+	}
+	log.Headers = headers.String
+	log.Body = body.String
+	log.Response = response.String
+	log.Error = errorMsg.String
+	return log, nil
 }
 
 func (dl *DatabaseLogger) GetLogs(limit int, offset int) ([]DatabaseRequestLog, error) {
@@ -270,33 +421,57 @@ func (dl *DatabaseLogger) GetLogs(limit int, offset int) ([]DatabaseRequestLog, 
 
 	var logs []DatabaseRequestLog
 	for rows.Next() {
-		var log DatabaseRequestLog
-		var headers, body, response, errorMsg sql.NullString
-		err := rows.Scan(
-			&log.ID,
-			&log.RequestUUID,
-			&log.Timestamp,
-			&log.Method,
-			&log.URL,
-			&headers,
-			&body,
-			&log.ResponseCode,
-			&response,
-			&log.IsStream,
-			&errorMsg,
-			&log.Duration,
-		)
+		log, err := scanRequestLog(rows)
 		if err != nil {
 			return nil, err
 		}
-		log.Headers = headers.String
-		log.Body = body.String
-		log.Response = response.String
-		log.Error = errorMsg.String
 		logs = append(logs, log)
 	}
 
-	return logs, nil
+	return logs, rows.Err()
+}
+
+func (dl *DatabaseLogger) GetLogByUUID(requestUUID string) (*DatabaseRequestLog, error) {
+	query := `
+	SELECT id, request_uuid, timestamp, method, url, headers, body, response_code, response, is_stream, error, duration_ms
+	FROM request_logs
+	WHERE request_uuid = ?
+	ORDER BY CASE WHEN response IS NOT NULL AND response != '' THEN 0 ELSE 1 END, id DESC
+	LIMIT 1
+	`
+
+	log, err := scanRequestLog(dl.db.QueryRow(query, requestUUID))
+	if err != nil {
+		return nil, err
+	}
+	return &log, nil
+}
+
+func (dl *DatabaseLogger) GetSSEEvents(requestUUID string) ([]SSEEvent, error) {
+	query := `
+	SELECT id, request_uuid, timestamp, event_type, data, sequence
+	FROM sse_events
+	WHERE request_uuid = ?
+	ORDER BY sequence ASC
+	`
+
+	rows, err := dl.db.Query(query, requestUUID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []SSEEvent
+	for rows.Next() {
+		var event SSEEvent
+		var data sql.NullString
+		if err := rows.Scan(&event.ID, &event.RequestUUID, &event.Timestamp, &event.EventType, &data, &event.Sequence); err != nil {
+			return nil, err
+		}
+		event.Data = data.String
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 func (dl *DatabaseLogger) GetErrorLogs(limit int) ([]DatabaseRequestLog, error) {
@@ -316,33 +491,14 @@ func (dl *DatabaseLogger) GetErrorLogs(limit int) ([]DatabaseRequestLog, error) 
 
 	var logs []DatabaseRequestLog
 	for rows.Next() {
-		var log DatabaseRequestLog
-		var headers, body, response, errorMsg sql.NullString
-		err := rows.Scan(
-			&log.ID,
-			&log.RequestUUID,
-			&log.Timestamp,
-			&log.Method,
-			&log.URL,
-			&headers,
-			&body,
-			&log.ResponseCode,
-			&response,
-			&log.IsStream,
-			&errorMsg,
-			&log.Duration,
-		)
+		log, err := scanRequestLog(rows)
 		if err != nil {
 			return nil, err
 		}
-		log.Headers = headers.String
-		log.Body = body.String
-		log.Response = response.String
-		log.Error = errorMsg.String
 		logs = append(logs, log)
 	}
 
-	return logs, nil
+	return logs, rows.Err()
 }
 
 func (dl *DatabaseLogger) DeleteOldLogs(days int) error {

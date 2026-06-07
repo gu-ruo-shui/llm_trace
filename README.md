@@ -9,6 +9,7 @@
 - 🔄 自动请求转发到目标 API
 - 🛡️ 保留原始请求头和响应头
 - 📊 JSON 格式的结构化日志
+- 🖥️ 内置观察面板：查看代理请求、SSE 事件、工具调用和响应时间
 
 ## 快速开始
 
@@ -19,11 +20,31 @@ go build -o llm_proxy
 ./llm_proxy
 ```
 
+### 配置文件
+
+默认启动时，程序会按以下顺序读取配置文件：
+
+1. `config.yaml`
+2. `config.json`
+
+如果设置了 `CONFIG_FILE`，则只读取该环境变量指定的文件。若默认配置文件都不存在，或 `CONFIG_FILE` 指定的文件不存在，程序会报告错误并退出。
+
+可以从示例文件创建配置：
+
+```bash
+cp config.yaml.example config.yaml
+# 或者
+cp config.json.example config.json
+```
+
 ### 环境变量配置
 
+- `CONFIG_FILE`: 显式指定配置文件路径；未设置时优先读取 `config.yaml`，再读取 `config.json`
 - `SERVER_PORT`: 代理服务监听端口 (默认: `:8080`)
-- `TARGET_URL`: 目标 API 地址 (默认: `https://api.openai.com`)
+- `TARGET_URL`: 目标 API 地址 (默认: `https://api.aicodewith.com`)
 - `LOG_DIR`: 日志存储目录 (默认: `./logs`)
+- `DB_PATH`: SQLite 数据库路径 (默认: `./logs/proxy.db`)
+- `USE_DB`: 是否启用数据库日志 (`true`/`1` 开启，`false`/`0` 关闭；大小写不敏感，默认: `false`)
 
 ### 使用示例
 
@@ -37,7 +58,21 @@ export LOG_DIR=./logs
 go run main.go
 ```
 
-### 测试请求
+### 观察面板
+
+数据库日志模式下启动后打开：
+
+```bash
+USE_DB=true go run main.go
+# 浏览器访问 http://localhost:8080/_ui/
+```
+
+面板提供：
+- 请求列表、状态码、耗时、stream/http 标记
+- 请求体、响应体、请求头详情
+- SSE event timeline，方便观察 agent 流式输出和 tool/harness 调用
+- 总请求数、今日请求数、错误数、平均延迟统计
+
 
 #### 非流式请求
 ```bash

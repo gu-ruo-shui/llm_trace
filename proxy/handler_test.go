@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -118,6 +119,53 @@ func TestProxyHandler_ServeHTTP_RegularResponse(t *testing.T) {
 	}
 }
 
+func TestProxyHandler_GzipRegularResponseDecodedForClientAndLog(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		defer gz.Close()
+		_, _ = gz.Write([]byte(`{"response":"gzip ok"}`))
+	}))
+	defer upstream.Close()
+
+	handler := NewProxyHandler(upstream.URL, logger)
+	req := httptest.NewRequest("GET", "/gzip", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", rr.Code)
+	}
+	if rr.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("Expected decoded client response to omit Content-Encoding, got %q", rr.Header().Get("Content-Encoding"))
+	}
+	if got := rr.Body.String(); got != `{"response":"gzip ok"}` {
+		t.Fatalf("Expected decoded response body, got %q", got)
+	}
+
+	content, err := os.ReadFile(logger.logFile.Name())
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+	logContent := string(content)
+	if !strings.Contains(logContent, `gzip ok`) {
+		t.Fatalf("Expected decoded gzip response in log, got: %s", logContent)
+	}
+	if strings.Contains(logContent, "base64 response body") || strings.Contains(logContent, `\ufffd`) {
+		t.Fatalf("Expected gzip log to be decoded text, got: %s", logContent)
+	}
+}
+
 func TestProxyHandler_ServeHTTP_StreamingResponse(t *testing.T) {
 	// 创建临时日志目录
 	tempDir := t.TempDir()
@@ -174,6 +222,61 @@ func TestProxyHandler_ServeHTTP_StreamingResponse(t *testing.T) {
 
 	if !strings.Contains(string(content), "data: chunk1") {
 		t.Error("Expected streaming chunks to be logged")
+	}
+}
+
+func TestProxyHandler_GzipStreamingResponseDecodedForClientAndLog(t *testing.T) {
+	tempDir := t.TempDir()
+	logger, err := NewLogger(tempDir)
+	if err != nil {
+		t.Fatalf("Failed to create logger: %v", err)
+	}
+	defer logger.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusOK)
+
+		gz := gzip.NewWriter(w)
+		for _, chunk := range []string{"data: chunk1\n\n", "data: chunk2\n\n"} {
+			_, _ = gz.Write([]byte(chunk))
+			_ = gz.Flush()
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+		_ = gz.Close()
+	}))
+	defer upstream.Close()
+
+	handler := NewProxyHandler(upstream.URL, logger)
+	req := httptest.NewRequest("GET", "/stream", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(&streamingRecorder{ResponseRecorder: rr}, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Expected status 200, got %d", rr.Code)
+	}
+	if rr.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("Expected decoded stream response to omit Content-Encoding, got %q", rr.Header().Get("Content-Encoding"))
+	}
+	if !strings.Contains(rr.Body.String(), "data: chunk1") || !strings.Contains(rr.Body.String(), "data: chunk2") {
+		t.Fatalf("Expected decoded SSE body, got %q", rr.Body.String())
+	}
+
+	content, err := os.ReadFile(logger.logFile.Name())
+	if err != nil {
+		t.Fatalf("Failed to read log file: %v", err)
+	}
+	logContent := string(content)
+	if !strings.Contains(logContent, "data: chunk1") || !strings.Contains(logContent, "data: chunk2") {
+		t.Fatalf("Expected decoded stream in log, got: %s", logContent)
+	}
+	if strings.Contains(logContent, "base64 response body") || strings.Contains(logContent, `\ufffd`) {
+		t.Fatalf("Expected gzip stream log to be decoded text, got: %s", logContent)
 	}
 }
 

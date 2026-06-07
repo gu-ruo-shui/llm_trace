@@ -42,6 +42,64 @@ func readLogDir(t *testing.T, logDir string) string {
 	return content.String()
 }
 
+func TestProxyWithBrowserNoiseGuard_DoesNotProxyBrowserNoise(t *testing.T) {
+	called := false
+	handler := proxyWithBrowserNoiseGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusTeapot)
+	}))
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+	}{
+		{name: "root redirects to dashboard", method: http.MethodGet, path: "/", wantStatus: http.StatusFound},
+		{name: "cloudflare rum ignored", method: http.MethodPost, path: "/cdn-cgi/rum", wantStatus: http.StatusNoContent},
+		{name: "target web assets ignored", method: http.MethodGet, path: "/assets/app.js", wantStatus: http.StatusNotFound},
+		{name: "target logo ignored", method: http.MethodGet, path: "/logo.png", wantStatus: http.StatusNotFound},
+		{name: "target setup status ignored", method: http.MethodGet, path: "/setup/status", wantStatus: http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called = false
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rr := httptest.NewRecorder()
+
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
+			}
+			if called {
+				t.Fatalf("browser noise request %s was forwarded to proxy handler", tt.path)
+			}
+		})
+	}
+}
+
+func TestProxyWithBrowserNoiseGuard_ProxiesLLMPath(t *testing.T) {
+	called := false
+	handler := proxyWithBrowserNoiseGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusAccepted)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"model":"test"}`))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected proxied status %d, got %d", http.StatusAccepted, rr.Code)
+	}
+	if !called {
+		t.Fatalf("expected /responses request to be forwarded to proxy handler")
+	}
+}
+
 // TestServer 用于集成测试的测试服务器
 type TestServer struct {
 	Server *httptest.Server

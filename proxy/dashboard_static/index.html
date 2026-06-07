@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LLM Observability</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/_ui/styles.css">
+<script src="/_ui/app.js" defer></script>
+
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="top">
+      <h1>LLM Observability</h1>
+      <div class="sub" id="health">Logfire-inspired trace console for requests, SSE events, tools, and latency.</div>
+    </div>
+    <div class="toolbar">
+      <button class="primary" onclick="refreshLatest()">Refresh</button>
+      <input id="filter" placeholder="filter url, model, body, tool" oninput="renderList()">
+    </div>
+    <div class="list" id="list"><div class="loading">Loading requests…</div></div>
+  </aside>
+  <main class="main">
+    <div class="cards">
+      <div class="card"><div class="label">Total calls</div><div class="num" id="sTotal">—</div></div>
+      <div class="card"><div class="label">Today</div><div class="num" id="sToday">—</div></div>
+      <div class="card"><div class="label">Errors</div><div class="num" id="sErrors">—</div></div>
+      <div class="card"><div class="label">Avg latency</div><div class="num" id="sAvg">—</div></div>
+    </div>
+    <section class="detail" id="detail"><div class="empty">Select a request to inspect the LLM trace.</div></section>
+  </main>
+</div>
+</body>
+</html>

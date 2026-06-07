@@ -3,15 +3,116 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestLoad_DefaultConfig(t *testing.T) {
-	// 确保没有配置文件存在
-	os.Remove("config.json")
-	os.Remove("config.yaml")
+func chdir(t *testing.T, dir string) {
+	t.Helper()
 
-	config := Load()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current directory: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Failed to change directory to %s: %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldDir); err != nil {
+			t.Fatalf("Failed to restore current directory to %s: %v", oldDir, err)
+		}
+	})
+}
+
+func mustLoad(t *testing.T) *Config {
+	t.Helper()
+
+	config, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	return config
+}
+
+func writeConfigFile(t *testing.T, path, content string) {
+	t.Helper()
+
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("Failed to write config file %s: %v", path, err)
+	}
+}
+
+func tempConfigFile(t *testing.T, name, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), name)
+	writeConfigFile(t, path, content)
+	return path
+}
+
+func TestLoad_DefaultPriorityUsesYAMLThenJSON(t *testing.T) {
+	t.Setenv("CONFIG_FILE", "")
+	chdir(t, t.TempDir())
+
+	writeConfigFile(t, "config.yaml", `target_url: "https://yaml.example.com"`)
+	writeConfigFile(t, "config.json", `{"target_url":"https://json.example.com"}`)
+
+	config := mustLoad(t)
+	if config.TargetURL != "https://yaml.example.com" {
+		t.Errorf("Expected config.yaml to be preferred, got %s", config.TargetURL)
+	}
+
+	if err := os.Remove("config.yaml"); err != nil {
+		t.Fatalf("Failed to remove config.yaml: %v", err)
+	}
+
+	config = mustLoad(t)
+	if config.TargetURL != "https://json.example.com" {
+		t.Errorf("Expected config.json fallback, got %s", config.TargetURL)
+	}
+
+	if err := os.Remove("config.json"); err != nil {
+		t.Fatalf("Failed to remove config.json: %v", err)
+	}
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Expected missing config files to return an error")
+	}
+	if !strings.Contains(err.Error(), "no config file found") {
+		t.Fatalf("Expected missing config error, got %v", err)
+	}
+}
+
+func TestLoad_CONFIGFILEOverridesDefaultSearch(t *testing.T) {
+	chdir(t, t.TempDir())
+	writeConfigFile(t, "config.yaml", `target_url: "https://yaml.example.com"`)
+	customJSON := filepath.Join(t.TempDir(), "custom.json")
+	writeConfigFile(t, customJSON, `{"target_url":"https://custom.example.com"}`)
+	t.Setenv("CONFIG_FILE", customJSON)
+
+	config := mustLoad(t)
+	if config.TargetURL != "https://custom.example.com" {
+		t.Errorf("Expected CONFIG_FILE to override default search, got %s", config.TargetURL)
+	}
+}
+
+func TestLoad_CONFIGFILEMissingReportsError(t *testing.T) {
+	t.Setenv("CONFIG_FILE", filepath.Join(t.TempDir(), "missing.yaml"))
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Expected missing CONFIG_FILE to return an error")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("Expected not found error, got %v", err)
+	}
+}
+
+func TestLoad_DefaultConfigValuesFromEmptyYAML(t *testing.T) {
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "empty.yaml", ""))
+
+	config := mustLoad(t)
 
 	if config.ServerPort != ":8080" {
 		t.Errorf("Expected default ServerPort :8080, got %s", config.ServerPort)
@@ -39,16 +140,9 @@ func TestLoad_JSONConfig(t *testing.T) {
 		"use_db": true
 	}`
 
-	// 创建临时配置文件
-	tempFile := "temp_config.json"
-	os.WriteFile(tempFile, []byte(configContent), 0644)
-	defer os.Remove(tempFile)
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "temp_config.json", configContent))
 
-	// 设置环境变量指向临时文件
-	os.Setenv("CONFIG_FILE", tempFile)
-	defer os.Unsetenv("CONFIG_FILE")
-
-	config := Load()
+	config := mustLoad(t)
 
 	if config.ServerPort != ":9090" {
 		t.Errorf("Expected ServerPort :9090, got %s", config.ServerPort)
@@ -74,16 +168,9 @@ log_dir: "./yaml_logs"
 db_path: "./yaml_logs/yaml.db"
 use_db: true`
 
-	// 创建临时YAML配置文件
-	tempFile := "temp_config.yaml"
-	os.WriteFile(tempFile, []byte(configContent), 0644)
-	defer os.Remove(tempFile)
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "temp_config.yaml", configContent))
 
-	// 设置环境变量指向临时文件
-	os.Setenv("CONFIG_FILE", tempFile)
-	defer os.Unsetenv("CONFIG_FILE")
-
-	config := Load()
+	config := mustLoad(t)
 
 	if config.ServerPort != ":7070" {
 		t.Errorf("Expected ServerPort :7070, got %s", config.ServerPort)
@@ -103,29 +190,14 @@ use_db: true`
 }
 
 func TestLoad_EnvOverride(t *testing.T) {
-	// 清理环境变量
-	os.Unsetenv("SERVER_PORT")
-	os.Unsetenv("TARGET_URL")
-	os.Unsetenv("LOG_DIR")
-	os.Unsetenv("DB_PATH")
-	os.Unsetenv("USE_DB")
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "base.yaml", ""))
+	t.Setenv("SERVER_PORT", ":9999")
+	t.Setenv("TARGET_URL", "https://api.test.com")
+	t.Setenv("LOG_DIR", "/tmp/logs")
+	t.Setenv("DB_PATH", "/tmp/test.db")
+	t.Setenv("USE_DB", "true")
 
-	// 设置环境变量
-	os.Setenv("SERVER_PORT", ":9999")
-	os.Setenv("TARGET_URL", "https://api.test.com")
-	os.Setenv("LOG_DIR", "/tmp/logs")
-	os.Setenv("DB_PATH", "/tmp/test.db")
-	os.Setenv("USE_DB", "true")
-
-	defer func() {
-		os.Unsetenv("SERVER_PORT")
-		os.Unsetenv("TARGET_URL")
-		os.Unsetenv("LOG_DIR")
-		os.Unsetenv("DB_PATH")
-		os.Unsetenv("USE_DB")
-	}()
-
-	config := Load()
+	config := mustLoad(t)
 
 	if config.ServerPort != ":9999" {
 		t.Errorf("Expected ServerPort :9999 from env, got %s", config.ServerPort)
@@ -150,20 +222,14 @@ func TestLoad_BadJSONConfig(t *testing.T) {
 		"target_url": "https://api.openai.com",
 		"invalid_json:`
 
-	// 创建临时配置文件
-	tempFile := "temp_bad_config.json"
-	os.WriteFile(tempFile, []byte(configContent), 0644)
-	defer os.Remove(tempFile)
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "temp_bad_config.json", configContent))
 
-	// 设置环境变量指向临时文件
-	os.Setenv("CONFIG_FILE", tempFile)
-	defer os.Unsetenv("CONFIG_FILE")
-
-	config := Load()
-
-	// 应该使用默认值，而不是panic
-	if config.ServerPort != ":8080" {
-		t.Errorf("Expected fallback to default ServerPort :8080, got %s", config.ServerPort)
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Expected invalid JSON config to return an error")
+	}
+	if !strings.Contains(err.Error(), "parse JSON") {
+		t.Fatalf("Expected parse JSON error, got %v", err)
 	}
 }
 
@@ -173,14 +239,9 @@ func TestLoad_AbsolutePaths(t *testing.T) {
 		"db_path": "/absolute/path/test.db"
 	}`
 
-	tempFile := "temp_abs_config.json"
-	os.WriteFile(tempFile, []byte(configContent), 0644)
-	defer os.Remove(tempFile)
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "temp_abs_config.json", configContent))
 
-	os.Setenv("CONFIG_FILE", tempFile)
-	defer os.Unsetenv("CONFIG_FILE")
-
-	config := Load()
+	config := mustLoad(t)
 
 	if config.LogDir != "/absolute/logs" {
 		t.Errorf("Expected absolute LogDir /absolute/logs, got %s", config.LogDir)
@@ -191,19 +252,19 @@ func TestLoad_AbsolutePaths(t *testing.T) {
 }
 
 func TestLoadFromFile_ReadError(t *testing.T) {
-	// Create a directory with same name as config file to cause read error
-	tempDir := "temp_config_dir.json"
-	os.Mkdir(tempDir, 0755)
-	defer os.RemoveAll(tempDir)
+	// Create a directory with same name as config file to cause read error.
+	tempDir := filepath.Join(t.TempDir(), "temp_config_dir.json")
+	if err := os.Mkdir(tempDir, 0755); err != nil {
+		t.Fatalf("Failed to create temp config dir: %v", err)
+	}
+	t.Setenv("CONFIG_FILE", tempDir)
 
-	os.Setenv("CONFIG_FILE", tempDir)
-	defer os.Unsetenv("CONFIG_FILE")
-
-	config := Load()
-
-	// Should fall back to defaults when read fails
-	if config.ServerPort != ":8080" {
-		t.Errorf("Expected default ServerPort :8080, got %s", config.ServerPort)
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Expected read error when CONFIG_FILE points to a directory")
+	}
+	if !strings.Contains(err.Error(), "read config file") {
+		t.Fatalf("Expected read config file error, got %v", err)
 	}
 }
 
@@ -213,17 +274,11 @@ func TestLoadFromFile_UnknownExtension(t *testing.T) {
 		"target_url": "https://api.test.com"
 	}`
 
-	// Create file with unknown extension
-	tempFile := "temp_config.txt"
-	os.WriteFile(tempFile, []byte(configContent), 0644)
-	defer os.Remove(tempFile)
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "temp_config.txt", configContent))
 
-	os.Setenv("CONFIG_FILE", tempFile)
-	defer os.Unsetenv("CONFIG_FILE")
+	config := mustLoad(t)
 
-	config := Load()
-
-	// Should try to parse as JSON by default
+	// Should try to parse as JSON by default.
 	if config.ServerPort != ":9191" {
 		t.Errorf("Expected ServerPort :9191, got %s", config.ServerPort)
 	}
@@ -243,14 +298,9 @@ log_dir: "./custom_logs"
 use_db: true
 `
 
-	tempFile := "temp_config_comments.yaml"
-	os.WriteFile(tempFile, []byte(configContent), 0644)
-	defer os.Remove(tempFile)
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "temp_config_comments.yaml", configContent))
 
-	os.Setenv("CONFIG_FILE", tempFile)
-	defer os.Unsetenv("CONFIG_FILE")
-
-	config := Load()
+	config := mustLoad(t)
 
 	if config.ServerPort != ":8181" {
 		t.Errorf("Expected ServerPort :8181, got %s", config.ServerPort)
@@ -258,7 +308,7 @@ use_db: true
 	if config.LogDir != filepath.Join(".", "custom_logs") {
 		t.Errorf("Expected LogDir ./custom_logs, got %s", config.LogDir)
 	}
-	// db_path should use default since it's commented out
+	// db_path should use default since it's commented out.
 	if config.DBPath != filepath.Join(".", "logs", "proxy.db") {
 		t.Errorf("Expected default DBPath, got %s", config.DBPath)
 	}
@@ -273,16 +323,11 @@ log_dir: "./test_logs"
 key_without_value:
 use_db: 1`
 
-	tempFile := "temp_config_invalid.yaml"
-	os.WriteFile(tempFile, []byte(configContent), 0644)
-	defer os.Remove(tempFile)
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "temp_config_invalid.yaml", configContent))
 
-	os.Setenv("CONFIG_FILE", tempFile)
-	defer os.Unsetenv("CONFIG_FILE")
+	config := mustLoad(t)
 
-	config := Load()
-
-	// Valid lines should still be parsed
+	// Valid lines should still be parsed.
 	if config.ServerPort != ":8282" {
 		t.Errorf("Expected ServerPort :8282, got %s", config.ServerPort)
 	}
@@ -295,22 +340,13 @@ use_db: 1`
 }
 
 func TestLoadFromEnv_RelativePaths(t *testing.T) {
-	// Clear any existing env vars
-	os.Unsetenv("LOG_DIR")
-	os.Unsetenv("DB_PATH")
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "base.yaml", ""))
+	t.Setenv("LOG_DIR", "relative/logs")
+	t.Setenv("DB_PATH", "relative/db/proxy.db")
 
-	// Set relative paths in environment
-	os.Setenv("LOG_DIR", "relative/logs")
-	os.Setenv("DB_PATH", "relative/db/proxy.db")
+	config := mustLoad(t)
 
-	defer func() {
-		os.Unsetenv("LOG_DIR")
-		os.Unsetenv("DB_PATH")
-	}()
-
-	config := Load()
-
-	// Should apply filepath.Join for relative paths
+	// Should apply filepath.Join for relative paths.
 	expectedLogDir := filepath.Join(".", "relative", "logs")
 	expectedDBPath := filepath.Join(".", "relative", "db", "proxy.db")
 
@@ -323,6 +359,8 @@ func TestLoadFromEnv_RelativePaths(t *testing.T) {
 }
 
 func TestLoadFromEnv_UseDBVariations(t *testing.T) {
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "base.yaml", ""))
+
 	tests := []struct {
 		name     string
 		value    string
@@ -333,19 +371,44 @@ func TestLoadFromEnv_UseDBVariations(t *testing.T) {
 		{"false", "false", false},
 		{"0", "0", false},
 		{"empty", "", false},
-		{"True uppercase", "True", false},
+		{"True uppercase", "True", true},
+		{"FALSE uppercase", "FALSE", false},
 		{"yes", "yes", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			os.Setenv("USE_DB", tt.value)
-			defer os.Unsetenv("USE_DB")
+			t.Setenv("USE_DB", tt.value)
 
-			config := Load()
+			config := mustLoad(t)
 
 			if config.UseDB != tt.expected {
 				t.Errorf("For USE_DB=%s, expected %t, got %t", tt.value, tt.expected, config.UseDB)
+			}
+		})
+	}
+}
+
+func TestLoadFromEnv_UseDBCanDisableConfigValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"false", "false"},
+		{"False", "False"},
+		{"FALSE", "FALSE"},
+		{"0", "0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CONFIG_FILE", tempConfigFile(t, "base.yaml", "use_db: true"))
+			t.Setenv("USE_DB", tt.value)
+
+			config := mustLoad(t)
+
+			if config.UseDB {
+				t.Errorf("For USE_DB=%s, expected false override, got true", tt.value)
 			}
 		})
 	}
@@ -358,16 +421,11 @@ log_dir: "./quoted_logs"
 db_path: "./quoted.db"
 use_db: "true"`
 
-	tempFile := "temp_config_quoted.yaml"
-	os.WriteFile(tempFile, []byte(configContent), 0644)
-	defer os.Remove(tempFile)
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "temp_config_quoted.yaml", configContent))
 
-	os.Setenv("CONFIG_FILE", tempFile)
-	defer os.Unsetenv("CONFIG_FILE")
+	config := mustLoad(t)
 
-	config := Load()
-
-	// Quotes should be stripped
+	// Quotes should be stripped.
 	if config.ServerPort != ":9393" {
 		t.Errorf("Expected ServerPort :9393, got %s", config.ServerPort)
 	}
@@ -405,20 +463,20 @@ func TestIsAbsolutePath(t *testing.T) {
 }
 
 func TestSetDefaults_WithPartialConfig(t *testing.T) {
-	// Test that setDefaults only sets missing values
+	// Test that setDefaults only sets missing values.
 	config := &Config{
 		ServerPort: ":9494",
-		// Leave other fields empty
+		// Leave other fields empty.
 	}
 
 	config.setDefaults()
 
-	// ServerPort should remain unchanged
+	// ServerPort should remain unchanged.
 	if config.ServerPort != ":9494" {
 		t.Errorf("ServerPort should not be changed, got %s", config.ServerPort)
 	}
 
-	// Other fields should get defaults
+	// Other fields should get defaults.
 	if config.TargetURL != "https://api.aicodewith.com" {
 		t.Errorf("Expected default TargetURL, got %s", config.TargetURL)
 	}
@@ -435,14 +493,9 @@ log_dir: ./logs_with_spaces
   db_path: ./indented.db
 use_db:1`
 
-	tempFile := "temp_config_mixed.yaml"
-	os.WriteFile(tempFile, []byte(configContent), 0644)
-	defer os.Remove(tempFile)
+	t.Setenv("CONFIG_FILE", tempConfigFile(t, "temp_config_mixed.yaml", configContent))
 
-	os.Setenv("CONFIG_FILE", tempFile)
-	defer os.Unsetenv("CONFIG_FILE")
-
-	config := Load()
+	config := mustLoad(t)
 
 	if config.ServerPort != ":5050" {
 		t.Errorf("Expected ServerPort :5050, got %s", config.ServerPort)

@@ -55,7 +55,7 @@ USE_DB=true ./llm_proxy        # Enable database logging
 3. **Configuration** (`config/` package):
    - Supports JSON/YAML files with environment variable overrides
    - Key settings: SERVER_PORT, TARGET_URL, LOG_DIR, DB_PATH, USE_DB
-   - Loads from `config.json` by default, override with `CONFIG_FILE` env var; commit only `config.json.example` / `config.yaml.example`
+   - Loads `config.yaml` by default, falls back to `config.json`; override with `CONFIG_FILE` env var; commit only `config.json.example` / `config.yaml.example`
 
 ### Request Flow
 

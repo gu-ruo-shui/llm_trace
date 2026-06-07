@@ -47,6 +47,7 @@ logs/
 # Local config files
 config.json
 config.yaml
+.llm_reverse_base_url
 
 # Temporary files
 *.tmp

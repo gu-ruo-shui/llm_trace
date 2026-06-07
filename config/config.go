@@ -2,10 +2,18 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+const (
+	defaultYAMLConfigFile = "config.yaml"
+	defaultJSONConfigFile = "config.json"
+)
+
+var defaultConfigFiles = []string{defaultYAMLConfigFile, defaultJSONConfigFile}
 
 type Config struct {
 	ServerPort string `json:"server_port" yaml:"server_port"`
@@ -15,32 +23,30 @@ type Config struct {
 	UseDB      bool   `json:"use_db" yaml:"use_db"`
 }
 
-func Load() *Config {
+func Load() (*Config, error) {
 	config := &Config{}
 
-	// Try to load from config file
-	config.loadFromFile()
+	// Try to load from config file. By default, prefer config.yaml and
+	// fall back to config.json. CONFIG_FILE still overrides this search.
+	if err := config.loadFromFile(); err != nil {
+		return nil, err
+	}
 
 	// Override with environment variables if they exist
 	config.loadFromEnv()
 
-	return config
+	return config, nil
 }
 
-func (c *Config) loadFromFile() {
-	configFile := getEnv("CONFIG_FILE", "config.json")
-
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		// Config file doesn't exist, use defaults
-		c.setDefaults()
-		return
+func (c *Config) loadFromFile() error {
+	configFile, err := resolveConfigFile()
+	if err != nil {
+		return err
 	}
 
 	data, err := os.ReadFile(configFile)
 	if err != nil {
-		// Use defaults if can't read file
-		c.setDefaults()
-		return
+		return fmt.Errorf("read config file %q: %w", configFile, err)
 	}
 
 	// Determine file type based on extension
@@ -48,25 +54,51 @@ func (c *Config) loadFromFile() {
 
 	switch ext {
 	case ".json":
-		c.loadFromJSON(data)
+		if err := c.loadFromJSON(data); err != nil {
+			return fmt.Errorf("parse JSON config file %q: %w", configFile, err)
+		}
 	case ".yaml", ".yml":
-		c.loadFromYAML(data)
+		if err := c.loadFromYAML(data); err != nil {
+			return fmt.Errorf("parse YAML config file %q: %w", configFile, err)
+		}
 	default:
 		// Try JSON by default
-		c.loadFromJSON(data)
+		if err := c.loadFromJSON(data); err != nil {
+			return fmt.Errorf("parse config file %q as JSON: %w", configFile, err)
+		}
 	}
-}
 
-func (c *Config) loadFromJSON(data []byte) {
-	err := json.Unmarshal(data, c)
-	if err != nil {
-		c.setDefaults()
-		return
-	}
 	c.setDefaults()
+	return nil
 }
 
-func (c *Config) loadFromYAML(data []byte) {
+func resolveConfigFile() (string, error) {
+	if configFile := os.Getenv("CONFIG_FILE"); configFile != "" {
+		if _, err := os.Stat(configFile); err != nil {
+			if os.IsNotExist(err) {
+				return "", fmt.Errorf("config file %q not found", configFile)
+			}
+			return "", fmt.Errorf("cannot access config file %q: %w", configFile, err)
+		}
+		return configFile, nil
+	}
+
+	for _, configFile := range defaultConfigFiles {
+		if _, err := os.Stat(configFile); err == nil {
+			return configFile, nil
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("cannot access config file %q: %w", configFile, err)
+		}
+	}
+
+	return "", fmt.Errorf("no config file found: tried %s", strings.Join(defaultConfigFiles, ", "))
+}
+
+func (c *Config) loadFromJSON(data []byte) error {
+	return json.Unmarshal(data, c)
+}
+
+func (c *Config) loadFromYAML(data []byte) error {
 	// Simple YAML parsing without external dependencies
 	// This is a basic implementation that handles simple key-value pairs
 	lines := strings.Split(string(data), "\n")
@@ -97,7 +129,7 @@ func (c *Config) loadFromYAML(data []byte) {
 			c.UseDB = (value == "true" || value == "1")
 		}
 	}
-	c.setDefaults()
+	return nil
 }
 
 func (c *Config) setDefaults() {
@@ -153,17 +185,14 @@ func (c *Config) loadFromEnv() {
 			c.DBPath = filepath.Join(".", c.DBPath)
 		}
 	}
-	if useDB := os.Getenv("USE_DB"); useDB == "true" || useDB == "1" {
-		c.UseDB = true
+	if useDB := strings.TrimSpace(os.Getenv("USE_DB")); useDB != "" {
+		switch strings.ToLower(useDB) {
+		case "true", "1":
+			c.UseDB = true
+		case "false", "0":
+			c.UseDB = false
+		}
 	}
-}
-
-func getEnv(key, defaultValue string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
-	}
-	return value
 }
 
 // isAbsolutePath checks if a path is absolute.
